@@ -18,6 +18,8 @@
 - Model pragmas and compile-time metadata extraction (`modelMeta`)
 - Schema SQL generation from models (`createTableSql`, `createSchemaSql`)
 - Migration manager (`newMigration`, `migrationFromModel`, `migrate`)
+- Migration safety helpers (`migrationChecksum`, `listAppliedMigrations`, `pendingMigrations`, `verifyMigrationHistory`, `migrateTo`)
+- CLI for migration workflows (`nimtra_cli migrate new/status/up/to/verify/list`)
 - Schema diff planner (`tableSnapshot`, `planModelDiff`, `ensureModelSchemaDiff`)
 - Migration warning persistence (`_nimtra_migrations.warnings` as JSON array)
 - Native libSQL C replica sync hook (`libsql_embedded`)
@@ -78,6 +80,53 @@ proc main() {.async.} =
 
 waitFor main()
 ```
+
+## Migration status and checksum verification
+
+```nim
+let applied = await db.listAppliedMigrations()
+let pending = await db.pendingMigrations([m1, m2, m3])
+await db.verifyMigrationHistory([m1, m2, m3], allowUnknownApplied = false)
+await db.migrateTo([m1, m2, m3], targetVersion = 2)
+```
+
+## CLI migration workflow
+
+`drizzle`のように、SQLファイルをディレクトリで管理してCLI実行できます。  
+推奨構成:
+
+```text
+db/
+  migrations/
+    20260307120000_create_users.sql
+    20260307121000_add_user_index.sql
+```
+
+CLI例:
+
+```bash
+# 0) ビルド（nimtraコマンドとして出力）
+nim c --path:src --out:./nimtra src/nimtra.nim
+
+# 1) マイグレーション雛形を作成
+./nimtra migrate new "create users"
+
+# 2) 適用状況を確認
+./nimtra migrate status --strict
+
+# 3) 未適用を実行
+./nimtra migrate up
+
+# 4) 特定バージョンまで適用
+./nimtra migrate to 20260307121000
+```
+
+主なオプション:
+- `--dir` (`db/migrations` がデフォルト)
+- `--table` (`_nimtra_migrations` がデフォルト)
+- `--url`, `--token`（未指定時は `TURSO_*` 環境変数）
+- `--prefer-curl`, `--strict`
+- 互換コマンドとして `nimtra_cli` も利用可能
 
 ## Auto diff migration (from current DB schema)
 
@@ -155,6 +204,8 @@ done
 - Schema diff notes:
   - `autoRebuild = false` keeps migration conservative and only applies compatible changes (e.g. add column/index).
   - `autoRebuild = true` generates a SQLite rebuild flow (`CREATE temp -> copy -> drop -> rename`) for incompatible changes.
+- Migration history notes:
+  - Applied rows now keep a deterministic `checksum` to detect local-vs-applied migration drift (`pendingMigrations` / `verifyMigrationHistory`).
 - Embedded sync notes:
   - Requires `libsql` shared library installed (`libsql.dylib` / `libsql.so` / `libsql.dll`).
   - Pass `libraryPath` explicitly if auto-discovery cannot find your library.

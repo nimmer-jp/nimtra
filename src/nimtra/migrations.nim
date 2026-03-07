@@ -31,8 +31,17 @@ type
     statements*: seq[string]
     warnings*: seq[string]
 
+  AppliedMigration* = object
+    version*: int64
+    name*: string
+    checksum*: string
+    warnings*: seq[string]
+    appliedAt*: string
+
 const
   DefaultMigrationsTable* = "_nimtra_migrations"
+  MigrationChecksumOffsetBasis = 14695981039346656037'u64
+  MigrationChecksumPrime = 1099511628211'u64
 
 proc newMigration*(
   version: SomeInteger,
@@ -65,6 +74,51 @@ proc validateMigrations*(migrations: openArray[Migration]) =
       raise newException(ValueError, "Duplicate migration version: " & $migration.version)
     seen.incl(migration.version)
 
+proc parseWarningsPayload(raw: string): seq[string] =
+  let trimmed = raw.strip()
+  if trimmed.len == 0:
+    return @[]
+
+  try:
+    let node = parseJson(trimmed)
+    case node.kind
+    of JArray:
+      for entry in node:
+        if entry.kind == JString:
+          result.add(entry.getStr())
+    of JString:
+      result.add(node.getStr())
+    else:
+      result.add(trimmed)
+  except CatchableError:
+    result.add(trimmed)
+
+proc migrationPayload(migration: Migration): string =
+  var chunks = @[
+    "version:" & $migration.version,
+    "name:" & migration.name
+  ]
+  for statement in migration.statements:
+    chunks.add("sql:" & statement.sql.strip())
+    if statement.params.len > 0:
+      for value in statement.params:
+        chunks.add("param:" & $value)
+  for warning in migration.warnings:
+    chunks.add("warning:" & warning.strip())
+  chunks.join("\n")
+
+proc migrationChecksum*(migration: Migration): string =
+  var hash = MigrationChecksumOffsetBasis
+  for ch in migrationPayload(migration):
+    hash = hash xor uint64(ord(ch))
+    hash = hash * MigrationChecksumPrime
+  toHex(hash, 16).toLowerAscii()
+
+proc copyMigrations(migrations: openArray[Migration]): seq[Migration] =
+  result = newSeqOfCap[Migration](migrations.len)
+  for migration in migrations:
+    result.add(migration)
+
 proc rowValue(row: SqlRow, keys: openArray[string]): Option[SqlValue] =
   for key in keys:
     if row.hasKey(key):
@@ -89,9 +143,11 @@ proc ensureMigrationsTable*(
 ): Future[void] {.async.} =
   let table = db.dialect.quoteIdent(tableName)
   let warningsCol = db.dialect.quoteIdent("warnings")
+  let checksumCol = db.dialect.quoteIdent("checksum")
   let sql = "CREATE TABLE IF NOT EXISTS " & table & " (" &
     db.dialect.quoteIdent("version") & " INTEGER PRIMARY KEY, " &
     db.dialect.quoteIdent("name") & " TEXT NOT NULL, " &
+    checksumCol & " TEXT NOT NULL DEFAULT '', " &
     warningsCol & " TEXT NOT NULL DEFAULT '[]', " &
     db.dialect.quoteIdent("applied_at") & " TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP" &
     ")"
@@ -99,29 +155,57 @@ proc ensureMigrationsTable*(
 
   if db.dialect.name() == "sqlite":
     var hasWarnings = false
+    var hasChecksum = false
     let pragmaRes = await db.query("PRAGMA table_info(" & table & ")")
     for row in pragmaRes.rows:
-      if rowString(row, ["name"]).toLowerAscii() == "warnings":
+      let colName = rowString(row, ["name"]).toLowerAscii()
+      if colName == "warnings":
         hasWarnings = true
-        break
+      elif colName == "checksum":
+        hasChecksum = true
     if not hasWarnings:
       let alterSql = "ALTER TABLE " & table & " ADD COLUMN " &
         warningsCol & " TEXT NOT NULL DEFAULT '[]'"
       discard await db.execute(alterSql)
+    if not hasChecksum:
+      let alterSql = "ALTER TABLE " & table & " ADD COLUMN " &
+        checksumCol & " TEXT NOT NULL DEFAULT ''"
+      discard await db.execute(alterSql)
+
+proc listAppliedMigrations*(
+  db: LibSQLConnection,
+  tableName = DefaultMigrationsTable
+): Future[seq[AppliedMigration]] {.async.} =
+  await db.ensureMigrationsTable(tableName)
+
+  let table = db.dialect.quoteIdent(tableName)
+  let sql = "SELECT " &
+    db.dialect.quoteIdent("version") & ", " &
+    db.dialect.quoteIdent("name") & ", " &
+    db.dialect.quoteIdent("checksum") & ", " &
+    db.dialect.quoteIdent("warnings") & ", " &
+    db.dialect.quoteIdent("applied_at") &
+    " FROM " & table &
+    " ORDER BY " & db.dialect.quoteIdent("version") & " ASC"
+
+  let res = await db.query(sql)
+  for row in res.rows:
+    var applied = AppliedMigration(
+      version: rowInt(row, ["version"]),
+      name: rowString(row, ["name"]),
+      checksum: rowString(row, ["checksum"]),
+      appliedAt: rowString(row, ["applied_at"])
+    )
+    applied.warnings = parseWarningsPayload(rowString(row, ["warnings"]))
+    result.add(applied)
 
 proc appliedMigrationVersions*(
   db: LibSQLConnection,
   tableName = DefaultMigrationsTable
 ): Future[HashSet[int64]] {.async.} =
-  await db.ensureMigrationsTable(tableName)
-
-  let table = db.dialect.quoteIdent(tableName)
-  let sql = "SELECT " & db.dialect.quoteIdent("version") & " FROM " & table
-  let res = await db.query(sql)
-
-  for row in res.rows:
-    if row.hasKey("version"):
-      result.incl(row["version"].asInt64())
+  let applied = await db.listAppliedMigrations(tableName)
+  for migration in applied:
+    result.incl(migration.version)
 
 proc tableSnapshot*(
   db: LibSQLConnection,
@@ -424,16 +508,23 @@ proc applyMigration*(
   batch.add(SqlStatement(sql: "BEGIN", params: @[]))
   batch.add(migration.statements)
   let warningsJson = $(%migration.warnings)
+  let checksum = migration.migrationChecksum()
 
   let insertSql = "INSERT INTO " & db.dialect.quoteIdent(tableName) &
     " (" & db.dialect.quoteIdent("version") & ", " &
     db.dialect.quoteIdent("name") & ", " &
+    db.dialect.quoteIdent("checksum") & ", " &
     db.dialect.quoteIdent("warnings") & ")" &
-    " VALUES (?, ?, ?)"
+    " VALUES (?, ?, ?, ?)"
 
   batch.add(SqlStatement(
     sql: insertSql,
-    params: @[toSqlValue(migration.version), toSqlValue(migration.name), toSqlValue(warningsJson)]
+    params: @[
+      toSqlValue(migration.version),
+      toSqlValue(migration.name),
+      toSqlValue(checksum),
+      toSqlValue(warningsJson)
+    ]
   ))
   batch.add(SqlStatement(sql: "COMMIT", params: @[]))
 
@@ -446,19 +537,125 @@ proc applyMigration*(
       discard
     raise
 
+proc verifyMigrationHistoryInternal(
+  db: LibSQLConnection,
+  migrations: seq[Migration],
+  tableName = DefaultMigrationsTable,
+  allowUnknownApplied = true
+): Future[void] {.async.} =
+  validateMigrations(migrations)
+
+  var localByVersion: Table[int64, Migration]
+  for migration in migrations:
+    localByVersion[migration.version] = migration
+
+  let applied = await db.listAppliedMigrations(tableName)
+  for existing in applied:
+    if localByVersion.hasKey(existing.version):
+      let local = localByVersion[existing.version]
+      let expectedChecksum = migrationChecksum(local)
+      if existing.checksum.len > 0 and existing.checksum != expectedChecksum:
+        raise newException(
+          ValueError,
+          "Migration checksum mismatch for version " & $existing.version &
+          " (" & local.name & "): applied=" & existing.checksum &
+          ", expected=" & expectedChecksum
+        )
+    elif not allowUnknownApplied:
+      raise newException(
+        ValueError,
+        "Database contains applied migration version " & $existing.version &
+        " that is not present in local migration set."
+      )
+
+proc verifyMigrationHistory*(
+  db: LibSQLConnection,
+  migrations: openArray[Migration],
+  tableName = DefaultMigrationsTable,
+  allowUnknownApplied = true
+): Future[void] =
+  let copied = copyMigrations(migrations)
+  verifyMigrationHistoryInternal(db, copied, tableName, allowUnknownApplied)
+
+proc pendingMigrationsInternal(
+  db: LibSQLConnection,
+  migrations: seq[Migration],
+  tableName = DefaultMigrationsTable
+): Future[seq[Migration]] {.async.} =
+  validateMigrations(migrations)
+  let ordered = sortedMigrations(migrations)
+  let applied = await db.listAppliedMigrations(tableName)
+
+  var appliedChecksums: Table[int64, string]
+  for migration in applied:
+    appliedChecksums[migration.version] = migration.checksum
+
+  for migration in ordered:
+    if appliedChecksums.hasKey(migration.version):
+      let existingChecksum = appliedChecksums[migration.version]
+      let expectedChecksum = migrationChecksum(migration)
+      if existingChecksum.len > 0 and existingChecksum != expectedChecksum:
+        raise newException(
+          ValueError,
+          "Migration checksum mismatch for version " & $migration.version &
+          " (" & migration.name & "): applied=" & existingChecksum &
+          ", expected=" & expectedChecksum
+        )
+      continue
+    result.add(migration)
+
+proc pendingMigrations*(
+  db: LibSQLConnection,
+  migrations: openArray[Migration],
+  tableName = DefaultMigrationsTable
+): Future[seq[Migration]] =
+  let copied = copyMigrations(migrations)
+  pendingMigrationsInternal(db, copied, tableName)
+
+proc migrateInternal(
+  db: LibSQLConnection,
+  migrations: seq[Migration],
+  tableName = DefaultMigrationsTable
+): Future[void] {.async.} =
+  let pending = await db.pendingMigrationsInternal(migrations, tableName)
+  for migration in pending:
+    await db.applyMigration(migration, tableName)
+
 proc migrate*(
   db: LibSQLConnection,
   migrations: openArray[Migration],
   tableName = DefaultMigrationsTable
-): Future[void] {.async.} =
-  validateMigrations(migrations)
-  let ordered = sortedMigrations(migrations)
-  let applied = await db.appliedMigrationVersions(tableName)
+): Future[void] =
+  let copied = copyMigrations(migrations)
+  migrateInternal(db, copied, tableName)
 
-  for migration in ordered:
-    if migration.version in applied:
-      continue
+proc migrateToInternal(
+  db: LibSQLConnection,
+  migrations: seq[Migration],
+  targetVersion: SomeInteger,
+  tableName = DefaultMigrationsTable
+): Future[void] {.async.} =
+  let target = int64(targetVersion)
+  if target <= 0:
+    raise newException(ValueError, "targetVersion must be greater than zero")
+
+  var filtered: seq[Migration]
+  for migration in migrations:
+    if migration.version <= target:
+      filtered.add(migration)
+
+  let pending = await db.pendingMigrationsInternal(filtered, tableName)
+  for migration in pending:
     await db.applyMigration(migration, tableName)
+
+proc migrateTo*(
+  db: LibSQLConnection,
+  migrations: openArray[Migration],
+  targetVersion: SomeInteger,
+  tableName = DefaultMigrationsTable
+): Future[void] =
+  let copied = copyMigrations(migrations)
+  migrateToInternal(db, copied, targetVersion, tableName)
 
 proc ensureModelSchema*[
   T

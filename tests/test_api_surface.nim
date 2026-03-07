@@ -53,3 +53,12 @@ suite "public api":
       .build()
     check stmt.sql ==
       "SELECT \"users\".\"id\", \"profiles\".\"bio\" FROM \"users\" INNER JOIN \"profiles\" ON \"profiles\".\"userId\" = \"users\".\"id\""
+
+  test "migration utility api compiles":
+    var db: LibSQLConnection
+    let m1 = newMigration(1, "first", ["SELECT 1"])
+    let m2 = newMigration(2, "second", ["SELECT 2"])
+    check compiles(db.listAppliedMigrations())
+    check compiles(db.pendingMigrations([m1, m2]))
+    check compiles(db.verifyMigrationHistory([m1, m2]))
+    check compiles(db.migrateTo([m1, m2], 1))
