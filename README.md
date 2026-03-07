@@ -3,9 +3,9 @@
   <p><strong>Async-first ORM and libSQL client for Nim</strong></p>
   <p>モデル定義、クエリビルダ、マイグレーション、Turso/libSQL 接続を 1 パッケージにまとめた Nim 向け ORM 基盤です。</p>
   <p>
-    <img alt="Nim >= 2.2.0" src="https://img.shields.io/badge/Nim-%3E%3D%202.2.0-FFC200?style=flat-square&logo=nim&logoColor=111827">
-    <img alt="version 0.1.2" src="https://img.shields.io/badge/version-0.1.2-111827?style=flat-square">
-    <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-059669?style=flat-square">
+    <img alt="Nim &gt;= 2.2.0" src="https://img.shields.io/badge/Nim-%3E%3D%202.2.0-FFC200?style=flat-square&amp;logo=nim&amp;logoColor=111827" />
+    <img alt="version 0.1.2" src="https://img.shields.io/badge/version-0.1.2-111827?style=flat-square" />
+    <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-059669?style=flat-square" />
   </p>
   <p>
     <a href="#why-nimtra">Why</a> ·
