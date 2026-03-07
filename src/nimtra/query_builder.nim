@@ -1,6 +1,6 @@
-import std/[asyncdispatch, macros, options, sequtils, strutils, typetraits]
+import std/[asyncdispatch, macros, options, sequtils, strutils]
 
-import ./[dialects, utils, values]
+import ./[dialects, mapper, model, values]
 import ./driver/libsql_http
 
 type
@@ -11,14 +11,15 @@ type
     selectedColumns*: seq[string]
     whereClauses*: seq[string]
     params*: seq[SqlValue]
-    orderByClause*: string
+    orderByClauses*: seq[string]
     limitValue*: Option[int]
+    offsetValue*: Option[int]
 
 proc quotedTableName[T](query: Query[T]): string =
   query.dialect.quoteIdent(query.table)
 
 proc defaultModelTable[T](): string =
-  defaultTableName(name(T))
+  modelTableName(T)
 
 proc select* [T](
   db: LibSQLConnection,
@@ -33,8 +34,9 @@ proc select* [T](
     selectedColumns: @[],
     whereClauses: @[],
     params: @[],
-    orderByClause: "",
-    limitValue: none(int)
+    orderByClauses: @[],
+    limitValue: none(int),
+    offsetValue: none(int)
   )
 
 proc select* [T](
@@ -50,8 +52,9 @@ proc select* [T](
     selectedColumns: @[],
     whereClauses: @[],
     params: @[],
-    orderByClause: "",
-    limitValue: none(int)
+    orderByClauses: @[],
+    limitValue: none(int),
+    offsetValue: none(int)
   )
 
 proc columns* [T](query: Query[T], cols: varargs[string]): Query[T] =
@@ -66,13 +69,37 @@ proc whereRaw* [T](query: Query[T], clause: string, args: openArray[SqlValue] = 
 
 proc orderBy* [T](query: Query[T], column: string, descending = false): Query[T] =
   result = query
-  result.orderByClause = query.dialect.quoteIdent(column) & (if descending: " DESC" else: " ASC")
+  result.orderByClauses.add(
+    query.dialect.quoteIdent(column) & (if descending: " DESC" else: " ASC")
+  )
+
+proc orderByRaw* [T](query: Query[T], clause: string): Query[T] =
+  let trimmed = clause.strip()
+  if trimmed.len == 0:
+    raise newException(ValueError, "ORDER BY clause cannot be empty")
+  result = query
+  result.orderByClauses.add(trimmed)
 
 proc limit* [T](query: Query[T], n: int): Query[T] =
   if n < 0:
     raise newException(ValueError, "LIMIT must be >= 0")
   result = query
   result.limitValue = some(n)
+
+proc offset* [T](query: Query[T], n: int): Query[T] =
+  if n < 0:
+    raise newException(ValueError, "OFFSET must be >= 0")
+  result = query
+  result.offsetValue = some(n)
+
+proc paginate* [T](query: Query[T], page, perPage: int): Query[T] =
+  if page <= 0:
+    raise newException(ValueError, "page must be >= 1")
+  if perPage <= 0:
+    raise newException(ValueError, "perPage must be >= 1")
+  result = query
+  result.limitValue = some(perPage)
+  result.offsetValue = some((page - 1) * perPage)
 
 proc build* [T](query: Query[T]): SqlStatement =
   if query.table.len == 0:
@@ -89,11 +116,22 @@ proc build* [T](query: Query[T]): SqlStatement =
   if query.whereClauses.len > 0:
     sql.add(" WHERE " & query.whereClauses.join(" AND "))
 
-  if query.orderByClause.len > 0:
-    sql.add(" ORDER BY " & query.orderByClause)
+  if query.orderByClauses.len > 0:
+    sql.add(" ORDER BY " & query.orderByClauses.join(", "))
 
   if query.limitValue.isSome:
     sql.add(" LIMIT " & $query.limitValue.get())
+
+  if query.offsetValue.isSome:
+    if query.limitValue.isNone:
+      case query.dialect.name()
+      of "postgres":
+        sql.add(" LIMIT ALL")
+      of "mysql":
+        sql.add(" LIMIT 18446744073709551615")
+      else:
+        sql.add(" LIMIT -1")
+    sql.add(" OFFSET " & $query.offsetValue.get())
 
   sql = query.dialect.applyPlaceholders(sql)
   SqlStatement(sql: sql, params: query.params)
@@ -246,11 +284,41 @@ proc all* [T](query: Query[T]): Future[seq[SqlRow]] {.async.} =
   let res = await query.db.query(stmt)
   res.rows
 
+proc allRows* [T](query: Query[T]): Future[seq[SqlRow]] {.async.} =
+  await query.all()
+
+proc allModels* [T](query: Query[T]): Future[seq[T]] {.async.} =
+  let rows = await query.all()
+  rowsToModels[T](rows)
+
 proc first* [T](query: Query[T]): Future[Option[SqlRow]] {.async.} =
   let rows = await query.limit(1).all()
   if rows.len == 0:
     return none(SqlRow)
   some(rows[0])
+
+proc firstRow* [T](query: Query[T]): Future[Option[SqlRow]] {.async.} =
+  await query.first()
+
+proc firstModel* [T](query: Query[T]): Future[Option[T]] {.async.} =
+  let row = await query.first()
+  rowOptionToModel[T](row)
+
+proc oneRow* [T](query: Query[T]): Future[SqlRow] {.async.} =
+  let rows = await query.limit(2).all()
+  if rows.len == 0:
+    raise newException(KeyError, "Expected one row but query returned none")
+  if rows.len > 1:
+    raise newException(ValueError, "Expected one row but query returned multiple rows")
+  rows[0]
+
+proc oneModel* [T](query: Query[T]): Future[T] {.async.} =
+  let rows = await query.limit(2).all()
+  if rows.len == 0:
+    raise newException(KeyError, "Expected one row but query returned none")
+  if rows.len > 1:
+    raise newException(ValueError, "Expected one row but query returned multiple rows")
+  rowToModel[T](rows[0])
 
 proc count* [T](query: Query[T]): Future[int] {.async.} =
   if query.db.isNil:
@@ -264,3 +332,16 @@ proc count* [T](query: Query[T]): Future[int] {.async.} =
   if not res.rows[0].hasKey("count"):
     return 0
   int(res.rows[0]["count"].asInt64())
+
+proc exists* [T](query: Query[T]): Future[bool] {.async.} =
+  if query.db.isNil:
+    raise newException(LibSQLError, "Query has no bound database. Use db.select(Model)")
+
+  let built = query.limit(1).build()
+  let existsSql = "SELECT EXISTS(SELECT 1 FROM (" & built.sql & ") AS __nimtra_exists) AS \"exists\""
+  let res = await query.db.query(existsSql, built.params)
+  if res.rows.len == 0:
+    return false
+  if not res.rows[0].hasKey("exists"):
+    return false
+  res.rows[0]["exists"].asBool()

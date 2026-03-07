@@ -1,4 +1,4 @@
-import std/[asyncdispatch, base64, httpclient, json, options, strutils, tables, uri]
+import std/[asyncdispatch, base64, httpclient, json, options, os, strutils, tables, uri]
 
 import ../[dialects, values]
 
@@ -14,6 +14,8 @@ type
     syncUrl*: string
     syncPath*: string
     timeoutMs*: int
+    maxRetries*: int
+    retryBackoffMs*: int
     closeAfterExecute*: bool
     syncHook*: SyncHook
     syncCloseHook*: SyncCloseHook
@@ -234,27 +236,48 @@ proc pipeline(db: LibSQLConnection, requests: seq[JsonNode]): Future[JsonNode] {
   if db.config.authToken.len > 0:
     headers["Authorization"] = "Bearer " & db.config.authToken
 
-  let response = await db.client.request(
-    db.pipelineUrl,
-    httpMethod = HttpPost,
-    headers = headers,
-    body = $body
-  )
+  proc isRetriableStatus(code: int): bool =
+    code == 408 or code == 429 or code >= 500
 
-  let responseBody = await response.body
-  if int(response.code) >= 400:
-    raise newException(LibSQLError, "libSQL HTTP error " & $response.code & ": " & responseBody)
+  var attempt = 0
+  while true:
+    try:
+      let response = await db.client.request(
+        db.pipelineUrl,
+        httpMethod = HttpPost,
+        headers = headers,
+        body = $body
+      )
 
-  result = parseJson(responseBody)
+      let responseBody = await response.body
+      let code = int(response.code)
+      if code >= 400:
+        if isRetriableStatus(code) and attempt < db.config.maxRetries:
+          inc attempt
+          let delay = max(0, db.config.retryBackoffMs) * attempt
+          if delay > 0:
+            await sleepAsync(delay)
+          continue
+        raise newException(LibSQLError, "libSQL HTTP error " & $response.code & ": " & responseBody)
 
-  if result.kind == JObject:
-    let nextBaton = getField(result, ["baton"])
-    if not nextBaton.isNil and nextBaton.kind == JString:
-      db.baton = some(nextBaton.getStr())
+      result = parseJson(responseBody)
 
-    let baseUrlNode = getField(result, ["base_url", "baseUrl"])
-    if not baseUrlNode.isNil and baseUrlNode.kind == JString:
-      db.baseUrl = some(baseUrlNode.getStr())
+      if result.kind == JObject:
+        let nextBaton = getField(result, ["baton"])
+        if not nextBaton.isNil and nextBaton.kind == JString:
+          db.baton = some(nextBaton.getStr())
+
+        let baseUrlNode = getField(result, ["base_url", "baseUrl"])
+        if not baseUrlNode.isNil and baseUrlNode.kind == JString:
+          db.baseUrl = some(baseUrlNode.getStr())
+      return
+    except CatchableError as e:
+      if (e of LibSQLError) or attempt >= db.config.maxRetries:
+        raise
+      inc attempt
+      let delay = max(0, db.config.retryBackoffMs) * attempt
+      if delay > 0:
+        await sleepAsync(delay)
 
 proc openLibSQL*(
   url: string,
@@ -262,6 +285,8 @@ proc openLibSQL*(
   syncUrl = "",
   syncPath = "/v1/sync",
   timeoutMs = 30_000,
+  maxRetries = 2,
+  retryBackoffMs = 200,
   closeAfterExecute = true,
   syncHook: SyncHook = nil,
   syncCloseHook: SyncCloseHook = nil
@@ -276,6 +301,8 @@ proc openLibSQL*(
       syncUrl: syncUrl,
       syncPath: syncPath,
       timeoutMs: timeoutMs,
+      maxRetries: max(0, maxRetries),
+      retryBackoffMs: max(0, retryBackoffMs),
       closeAfterExecute: closeAfterExecute,
       syncHook: syncHook,
       syncCloseHook: syncCloseHook
@@ -403,3 +430,83 @@ proc close*(db: LibSQLConnection): Future[void] {.async.} =
 
   if db.config.syncCloseHook != nil:
     db.config.syncCloseHook()
+
+proc openLibSQLEnv*(
+  urlEnv = "TURSO_DATABASE_URL",
+  authTokenEnv = "TURSO_AUTH_TOKEN",
+  syncUrlEnv = "TURSO_SYNC_URL",
+  syncPath = "/v1/sync",
+  timeoutMs = 30_000,
+  maxRetries = 2,
+  retryBackoffMs = 200,
+  closeAfterExecute = true
+): Future[LibSQLConnection] {.async.} =
+  let url = getEnv(urlEnv).strip()
+  if url.len == 0:
+    raise newException(ValueError, "Environment variable not set: " & urlEnv)
+
+  let authToken = getEnv(authTokenEnv)
+  let syncUrl = getEnv(syncUrlEnv)
+
+  await openLibSQL(
+    url = url,
+    authToken = authToken,
+    syncUrl = syncUrl,
+    syncPath = syncPath,
+    timeoutMs = timeoutMs,
+    maxRetries = maxRetries,
+    retryBackoffMs = retryBackoffMs,
+    closeAfterExecute = closeAfterExecute
+  )
+
+proc withLibSQL*[T](
+  url: string,
+  authToken = "",
+  syncUrl = "",
+  syncPath = "/v1/sync",
+  timeoutMs = 30_000,
+  maxRetries = 2,
+  retryBackoffMs = 200,
+  closeAfterExecute = true,
+  body: proc(db: LibSQLConnection): Future[T] {.closure.}
+): Future[T] {.async.} =
+  let db = await openLibSQL(
+    url = url,
+    authToken = authToken,
+    syncUrl = syncUrl,
+    syncPath = syncPath,
+    timeoutMs = timeoutMs,
+    maxRetries = maxRetries,
+    retryBackoffMs = retryBackoffMs,
+    closeAfterExecute = closeAfterExecute
+  )
+  try:
+    return await body(db)
+  finally:
+    await db.close()
+
+proc withLibSQLEnv*[T](
+  body: proc(db: LibSQLConnection): Future[T] {.closure.},
+  urlEnv = "TURSO_DATABASE_URL",
+  authTokenEnv = "TURSO_AUTH_TOKEN",
+  syncUrlEnv = "TURSO_SYNC_URL",
+  syncPath = "/v1/sync",
+  timeoutMs = 30_000,
+  maxRetries = 2,
+  retryBackoffMs = 200,
+  closeAfterExecute = true
+): Future[T] {.async.} =
+  let db = await openLibSQLEnv(
+    urlEnv = urlEnv,
+    authTokenEnv = authTokenEnv,
+    syncUrlEnv = syncUrlEnv,
+    syncPath = syncPath,
+    timeoutMs = timeoutMs,
+    maxRetries = maxRetries,
+    retryBackoffMs = retryBackoffMs,
+    closeAfterExecute = closeAfterExecute
+  )
+  try:
+    return await body(db)
+  finally:
+    await db.close()

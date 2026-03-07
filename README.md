@@ -6,12 +6,14 @@
 
 - Async libSQL HTTP pipeline driver (`openLibSQL`, `execute`, `query`, `close`)
 - Batch execution (`executeBatch`) for transaction-safe multi-statement flows
+- Connection helpers (`openLibSQLEnv`, `withLibSQL`, `withLibSQLEnv`) and retry config
 - Hrana-like typed value encode/decode and result parsing
 - Dialect abstraction (`SQLite`, `Postgres`, `MySQL`) with placeholder rewriting
 - Compile-time `where` macro:
   - Example: `select(User).where(it.age >= 18 and it.status == "active")`
-- Basic query builder (`select`, `where`, `orderBy`, `limit`, `all`, `first`, `count`)
-- Basic CRUD helpers (`insert`, `updateById`, `deleteById`, `findById`)
+- Query builder (`select`, `where`, multi-`orderBy`, `limit`, `offset`, `paginate`, `all`, `first`, `oneRow`, `count`, `exists`)
+- Basic CRUD helpers (`insert`, `updateById`, `deleteById`, `findById`, `findAll`, `findAllModels`, `existsById`)
+- Row-to-model mapping (`rowToModel`, `rowsToModels`, `allModels`, `firstModel`, `findByIdModel`) with snake_case/case-insensitive column matching
 - Model pragmas and compile-time metadata extraction (`modelMeta`)
 - Schema SQL generation from models (`createTableSql`, `createSchemaSql`)
 - Migration manager (`newMigration`, `migrationFromModel`, `migrate`)
@@ -33,21 +35,18 @@ type
     age: int
 
 proc main() {.async.} =
-  let db = await openLibSQL(
-    url = "libsql://your-db.turso.io",
-    authToken = "YOUR_TOKEN"
-  )
+  let db = await openLibSQLEnv()
 
   discard await db.insert(User(name: "Alice", email: "alice@example.com", age: 22))
 
-  let rows = await db
+  let users = await db
     .select(User)
     .where(it.age >= 18 and it.email != nil)
     .orderBy("age", descending = true)
-    .limit(20)
-    .all()
+    .paginate(page = 1, perPage = 20)
+    .allModels()
 
-  echo rows.len
+  echo users.len
   await db.close()
 
 waitFor main()
@@ -144,6 +143,9 @@ done
   - If `syncUrl` is supplied, nimtra sends `POST` to that endpoint (or to `syncPath` when URL has no path).
   - If neither is supplied, `sync()` runs a lightweight `SELECT 1` checkpoint.
 - HTTP driver currently targets the `/v2/pipeline` flow first.
+- HTTP retry behavior:
+  - `openLibSQL` supports `maxRetries` and `retryBackoffMs`.
+  - Retries are applied on transport errors and `408/429/5xx` responses.
 - Schema diff notes:
   - `autoRebuild = false` keeps migration conservative and only applies compatible changes (e.g. add column/index).
   - `autoRebuild = true` generates a SQLite rebuild flow (`CREATE temp -> copy -> drop -> rename`) for incompatible changes.

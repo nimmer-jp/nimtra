@@ -9,6 +9,10 @@ type
     email {.unique.}: string
     createdAt {.default: "CURRENT_TIMESTAMP".}: string
 
+  Session = ref object
+    id {.primary, autoincrement.}: int
+    token: string
+
 suite "model metadata":
   test "extracts fields and constraints":
     let meta = modelMeta(User)
@@ -29,3 +33,7 @@ suite "model metadata":
 
     check meta.fields[3].name == "createdAt"
     check meta.fields[3].defaultValue == some("CURRENT_TIMESTAMP")
+
+  test "resolves model table name":
+    check modelTableName(User) == "app_users"
+    check modelTableName(Session) == "sessions"

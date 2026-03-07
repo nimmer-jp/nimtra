@@ -187,3 +187,6 @@ macro modelMeta*(T: typedesc): untyped =
       table: `tableNameLit`,
       fields: `fieldsArray`
     )
+
+proc modelTableName*[T](_: typedesc[T]): string =
+  modelMeta(T).table

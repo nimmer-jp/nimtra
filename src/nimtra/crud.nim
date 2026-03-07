@@ -1,10 +1,10 @@
-import std/[asyncdispatch, options, sequtils, strutils, typetraits]
+import std/[asyncdispatch, options, sequtils, strutils]
 
-import ./[utils, values]
+import ./[mapper, model, values]
 import ./driver/libsql_http
 
 proc defaultCrudTable[T](): string =
-  defaultTableName(name(T))
+  modelTableName(T)
 
 template eachModelField(entity: untyped, body: untyped) =
   when entity is ref object:
@@ -46,6 +46,15 @@ proc insert* [T](
 
   await db.execute(sql, params)
 
+proc insertReturningId* [T](
+  db: LibSQLConnection,
+  entity: T,
+  tableName = "",
+  idField = "id"
+): Future[Option[int64]] {.async.} =
+  let res = await db.insert(entity, tableName, idField)
+  res.lastInsertRowId
+
 proc updateById* [T](
   db: LibSQLConnection,
   entity: T,
@@ -85,7 +94,7 @@ proc updateById* [T](
 
   await db.execute(sql, params)
 
-proc deleteById* [T, I: SomeInteger](
+proc deleteById* [T, I](
   db: LibSQLConnection,
   _: typedesc[T],
   id: I,
@@ -101,7 +110,7 @@ proc deleteById* [T, I: SomeInteger](
 
   await db.execute(sql, @[toSqlValue(id)])
 
-proc findById* [T, I: SomeInteger](
+proc findById* [T, I](
   db: LibSQLConnection,
   _: typedesc[T],
   id: I,
@@ -118,3 +127,44 @@ proc findById* [T, I: SomeInteger](
   if res.rows.len == 0:
     return none(SqlRow)
   some(res.rows[0])
+
+proc findByIdModel* [T, I](
+  db: LibSQLConnection,
+  modelType: typedesc[T],
+  id: I,
+  tableName = "",
+  idField = "id"
+): Future[Option[T]] {.async.} =
+  let row = await db.findById(modelType, id, tableName, idField)
+  rowOptionToModel[T](row)
+
+proc findAll* [T](
+  db: LibSQLConnection,
+  _: typedesc[T],
+  tableName = ""
+): Future[seq[SqlRow]] {.async.} =
+  if db.isNil:
+    raise newException(LibSQLError, "Database handle is nil")
+
+  let targetTable = if tableName.len > 0: tableName else: defaultCrudTable[T]()
+  let sql = "SELECT * FROM " & db.dialect.quoteIdent(targetTable)
+  let res = await db.query(sql)
+  res.rows
+
+proc findAllModels* [T](
+  db: LibSQLConnection,
+  modelType: typedesc[T],
+  tableName = ""
+): Future[seq[T]] {.async.} =
+  let rows = await db.findAll(modelType, tableName)
+  rowsToModels[T](rows)
+
+proc existsById* [T, I](
+  db: LibSQLConnection,
+  modelType: typedesc[T],
+  id: I,
+  tableName = "",
+  idField = "id"
+): Future[bool] {.async.} =
+  let row = await db.findById(modelType, id, tableName, idField)
+  row.isSome
