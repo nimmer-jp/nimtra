@@ -2,6 +2,17 @@
 
 `nimtra` is an async-first ORM foundation for Nim with a native libSQL (Turso) HTTP driver.
 
+## Install
+
+```bash
+nimble install nimtra
+```
+
+`nimtra` is published as a hybrid package, so one install gives you both:
+
+- the library modules (`import nimtra`)
+- the migration CLI binaries (`nimtra`, `nimtra_cli`)
+
 ## Implemented
 
 - Async libSQL HTTP pipeline driver (`openLibSQL`, `execute`, `query`, `close`)
@@ -105,20 +116,20 @@ db/
 CLI例:
 
 ```bash
-# 0) ビルド（nimtraコマンドとして出力）
-nim c --path:src --out:./nimtra src/nimtra.nim
+# 0) インストール
+nimble install nimtra
 
 # 1) マイグレーション雛形を作成
-./nimtra migrate new "create users"
+nimtra migrate new "create users"
 
 # 2) 適用状況を確認
-./nimtra migrate status --strict
+nimtra migrate status --strict
 
 # 3) 未適用を実行
-./nimtra migrate up
+nimtra migrate up
 
 # 4) 特定バージョンまで適用
-./nimtra migrate to 20260307121000
+nimtra migrate to 20260307121000
 ```
 
 主なオプション:
@@ -181,9 +192,24 @@ waitFor main()
 ## Test
 
 ```bash
-for t in tests/test_*.nim; do
-  nim c -r --nimcache:.nimcache --path:src "$t"
-done
+nimble test
+```
+
+## Publish to Nimble
+
+Nimble は Git タグを配布単位として扱います。公開時は次の流れです。
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+nimble publish
+```
+
+公開前のローカル確認:
+
+```bash
+nimble --nimbleDir:.nimble-publish-test install -y
+nimble --nimbleDir:.nimble-publish-test build -y
 ```
 
 ## Notes
