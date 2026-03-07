@@ -16,6 +16,37 @@ template eachModelField(entity: untyped, body: untyped) =
     for fieldName, fieldValue in fieldPairs(entity):
       body
 
+proc eqFieldName(a, b: string): bool =
+  a.toLowerAscii() == b.toLowerAscii()
+
+proc containsFieldName(fields: openArray[string], candidate: string): bool =
+  for field in fields:
+    if eqFieldName(field, candidate):
+      return true
+  false
+
+proc collectInsertData[T](entity: T, idField: string): tuple[cols: seq[string], params: seq[SqlValue]] =
+  when T is ref object:
+    if entity.isNil:
+      raise newException(ValueError, "Entity is nil")
+    for fieldName, fieldValue in fieldPairs(entity[]):
+      var includeField = true
+      when fieldValue is SomeInteger:
+        if fieldName == idField and fieldValue == 0:
+          includeField = false
+      if includeField:
+        result.cols.add(fieldName)
+        result.params.add(toSqlValue(fieldValue))
+  else:
+    for fieldName, fieldValue in fieldPairs(entity):
+      var includeField = true
+      when fieldValue is SomeInteger:
+        if fieldName == idField and fieldValue == 0:
+          includeField = false
+      if includeField:
+        result.cols.add(fieldName)
+        result.params.add(toSqlValue(fieldValue))
+
 proc insert* [T](
   db: LibSQLConnection,
   entity: T,
@@ -26,15 +57,9 @@ proc insert* [T](
     raise newException(LibSQLError, "Database handle is nil")
 
   let targetTable = if tableName.len > 0: tableName else: defaultCrudTable[T]()
-  var cols: seq[string]
-  var params: seq[SqlValue]
-
-  eachModelField(entity):
-    when fieldValue is SomeInteger:
-      if fieldName == idField and fieldValue == 0:
-        continue
-    cols.add(fieldName)
-    params.add(toSqlValue(fieldValue))
+  let insertData = collectInsertData(entity, idField)
+  let cols = insertData.cols
+  let params = insertData.params
 
   if cols.len == 0:
     raise newException(ValueError, "No columns found for INSERT")
@@ -45,6 +70,122 @@ proc insert* [T](
     " (" & quoted & ") VALUES (" & placeholders & ")"
 
   await db.execute(sql, params)
+
+proc upsertInternal[T](
+  db: LibSQLConnection,
+  entity: T,
+  conflictFields: seq[string],
+  updateFields: seq[string],
+  tableName = "",
+  idField = "id"
+): Future[SqlResult] {.async.} =
+  if db.isNil:
+    raise newException(LibSQLError, "Database handle is nil")
+
+  var normalizedConflict: seq[string]
+  for field in conflictFields:
+    let trimmed = field.strip()
+    if trimmed.len == 0:
+      continue
+    normalizedConflict.add(trimmed)
+
+  if normalizedConflict.len == 0:
+    raise newException(ValueError, "conflictFields must contain at least one field")
+
+  let targetTable = if tableName.len > 0: tableName else: defaultCrudTable[T]()
+  let insertData = collectInsertData(entity, idField)
+  let cols = insertData.cols
+  let params = insertData.params
+
+  if cols.len == 0:
+    raise newException(ValueError, "No columns found for UPSERT")
+
+  for conflictField in normalizedConflict:
+    if not containsFieldName(cols, conflictField):
+      raise newException(
+        ValueError,
+        "Conflict field '" & conflictField & "' is not present in UPSERT columns"
+      )
+
+  var finalUpdateFields: seq[string]
+  if updateFields.len > 0:
+    for field in updateFields:
+      let trimmed = field.strip()
+      if trimmed.len == 0:
+        continue
+      if eqFieldName(trimmed, idField):
+        continue
+      if not containsFieldName(cols, trimmed):
+        raise newException(
+          ValueError,
+          "Update field '" & trimmed & "' is not present in UPSERT columns"
+        )
+      if not containsFieldName(finalUpdateFields, trimmed):
+        finalUpdateFields.add(trimmed)
+  else:
+    for col in cols:
+      if eqFieldName(col, idField):
+        continue
+      if containsFieldName(normalizedConflict, col):
+        continue
+      finalUpdateFields.add(col)
+
+  let quotedCols = cols.mapIt(db.dialect.quoteIdent(it)).join(", ")
+  let placeholders = cols.mapIt("?").join(", ")
+  let conflictSql = normalizedConflict.mapIt(db.dialect.quoteIdent(it)).join(", ")
+
+  var sql = "INSERT INTO " & db.dialect.quoteIdent(targetTable) &
+    " (" & quotedCols & ") VALUES (" & placeholders & ") ON CONFLICT (" & conflictSql & ") "
+
+  if finalUpdateFields.len == 0:
+    sql.add("DO NOTHING")
+  else:
+    let updateSql = finalUpdateFields.mapIt(
+      db.dialect.quoteIdent(it) & " = excluded." & db.dialect.quoteIdent(it)
+    ).join(", ")
+    sql.add("DO UPDATE SET " & updateSql)
+
+  await db.execute(sql, params)
+
+proc upsert* [T](
+  db: LibSQLConnection,
+  entity: T,
+  conflictFields: openArray[string],
+  updateFields: openArray[string] = [],
+  tableName = "",
+  idField = "id"
+): Future[SqlResult] =
+  var conflictCopy = newSeqOfCap[string](conflictFields.len)
+  for field in conflictFields:
+    conflictCopy.add(field)
+  var updateCopy = newSeqOfCap[string](updateFields.len)
+  for field in updateFields:
+    updateCopy.add(field)
+  upsertInternal(db, entity, conflictCopy, updateCopy, tableName, idField)
+
+proc upsert* [T](
+  db: LibSQLConnection,
+  entity: T,
+  conflictField: string,
+  updateFields: openArray[string] = [],
+  tableName = "",
+  idField = "id"
+): Future[SqlResult] {.async.} =
+  var updateCopy = newSeqOfCap[string](updateFields.len)
+  for field in updateFields:
+    updateCopy.add(field)
+  await upsertInternal(db, entity, @[conflictField], updateCopy, tableName, idField)
+
+proc upsertReturningId* [T](
+  db: LibSQLConnection,
+  entity: T,
+  conflictFields: openArray[string],
+  updateFields: openArray[string] = [],
+  tableName = "",
+  idField = "id"
+): Future[Option[int64]] {.async.} =
+  let res = await db.upsert(entity, conflictFields, updateFields, tableName, idField)
+  res.lastInsertRowId
 
 proc insertReturningId* [T](
   db: LibSQLConnection,

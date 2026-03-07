@@ -7,12 +7,13 @@
 - Async libSQL HTTP pipeline driver (`openLibSQL`, `execute`, `query`, `close`)
 - Batch execution (`executeBatch`) for transaction-safe multi-statement flows
 - Connection helpers (`openLibSQLEnv`, `withLibSQL`, `withLibSQLEnv`) and retry config
+- HTTP transport fallback to `curl` for environments where Nim TLS handshake is unavailable/unstable
 - Hrana-like typed value encode/decode and result parsing
 - Dialect abstraction (`SQLite`, `Postgres`, `MySQL`) with placeholder rewriting
 - Compile-time `where` macro:
   - Example: `select(User).where(it.age >= 18 and it.status == "active")`
-- Query builder (`select`, `where`, multi-`orderBy`, `limit`, `offset`, `paginate`, `all`, `first`, `oneRow`, `count`, `exists`)
-- Basic CRUD helpers (`insert`, `updateById`, `deleteById`, `findById`, `findAll`, `findAllModels`, `existsById`)
+- Query builder (`select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `joinRaw`, `where`, multi-`orderBy`, `limit`, `offset`, `paginate`, `all`, `first`, `oneRow`, `count`, `exists`)
+- Basic CRUD helpers (`insert`, `upsert`, `upsertReturningId`, `updateById`, `deleteById`, `findById`, `findAll`, `findAllModels`, `existsById`)
 - Row-to-model mapping (`rowToModel`, `rowsToModels`, `allModels`, `firstModel`, `findByIdModel`) with snake_case/case-insensitive column matching
 - Model pragmas and compile-time metadata extraction (`modelMeta`)
 - Schema SQL generation from models (`createTableSql`, `createSchemaSql`)
@@ -146,6 +147,11 @@ done
 - HTTP retry behavior:
   - `openLibSQL` supports `maxRetries` and `retryBackoffMs`.
   - Retries are applied on transport errors and `408/429/5xx` responses.
+  - `useCurlFallback = true` (default) retries via `curl` when Nim HTTP/TLS transport fails.
+  - `preferCurlTransport = true` forces `curl` transport for all requests.
+- Environment helper names:
+  - `openLibSQLEnv` reads `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` by default.
+  - It also accepts `TURSO_URL` / `TURSO_TOKEN` as fallback aliases.
 - Schema diff notes:
   - `autoRebuild = false` keeps migration conservative and only applies compatible changes (e.g. add column/index).
   - `autoRebuild = true` generates a SQLite rebuild flow (`CREATE temp -> copy -> drop -> rename`) for incompatible changes.

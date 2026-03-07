@@ -61,3 +61,26 @@ suite "query builder":
   test "uses table pragma name by default":
     let stmt = select(AuditLog).build()
     check stmt.sql == "SELECT * FROM \"audit_log_entries\""
+
+  test "builds join clauses and raw projections":
+    let stmt =
+      select(User, tableName = "users")
+        .columnsRaw("\"users\".\"id\" AS user_id", "\"posts\".\"title\"")
+        .join("posts", "\"posts\".\"userId\" = \"users\".\"id\"")
+        .whereRaw("\"posts\".\"title\" <> ?", [toSqlValue("")])
+        .build()
+
+    check stmt.sql ==
+      "SELECT \"users\".\"id\" AS user_id, \"posts\".\"title\" FROM \"users\" INNER JOIN \"posts\" ON \"posts\".\"userId\" = \"users\".\"id\" WHERE \"posts\".\"title\" <> ?"
+    check stmt.params.len == 1
+
+  test "supports raw from with alias and left join":
+    let stmt =
+      select(User)
+        .fromRaw("\"users\" u")
+        .columnsRaw("u.id", "p.title")
+        .leftJoin("posts p", "p.userId = u.id", rawTable = true)
+        .build()
+
+    check stmt.sql ==
+      "SELECT u.id, p.title FROM \"users\" u LEFT JOIN posts p ON p.userId = u.id"

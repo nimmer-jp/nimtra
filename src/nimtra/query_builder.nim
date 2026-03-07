@@ -4,11 +4,21 @@ import ./[dialects, mapper, model, values]
 import ./driver/libsql_http
 
 type
+  JoinType* = enum
+    jtInner,
+    jtLeft,
+    jtRight,
+    jtFull,
+    jtCross
+
   Query* [T] = object
     db*: LibSQLConnection
     dialect*: Dialect
     table*: string
+    tableIsRaw*: bool
     selectedColumns*: seq[string]
+    rawSelectedColumns*: seq[string]
+    joinClauses*: seq[string]
     whereClauses*: seq[string]
     params*: seq[SqlValue]
     orderByClauses*: seq[string]
@@ -16,7 +26,10 @@ type
     offsetValue*: Option[int]
 
 proc quotedTableName[T](query: Query[T]): string =
-  query.dialect.quoteIdent(query.table)
+  if query.tableIsRaw:
+    query.table
+  else:
+    query.dialect.quoteIdent(query.table)
 
 proc defaultModelTable[T](): string =
   modelTableName(T)
@@ -31,7 +44,10 @@ proc select* [T](
     db: db,
     dialect: if not db.isNil and not db.dialect.isNil: db.dialect else: newSQLiteDialect(),
     table: resolvedTable,
+    tableIsRaw: false,
     selectedColumns: @[],
+    rawSelectedColumns: @[],
+    joinClauses: @[],
     whereClauses: @[],
     params: @[],
     orderByClauses: @[],
@@ -49,7 +65,10 @@ proc select* [T](
     db: nil,
     dialect: if not dialect.isNil: dialect else: newSQLiteDialect(),
     table: resolvedTable,
+    tableIsRaw: false,
     selectedColumns: @[],
+    rawSelectedColumns: @[],
+    joinClauses: @[],
     whereClauses: @[],
     params: @[],
     orderByClauses: @[],
@@ -61,6 +80,71 @@ proc columns* [T](query: Query[T], cols: varargs[string]): Query[T] =
   result = query
   for col in cols:
     result.selectedColumns.add(col)
+
+proc columnsRaw* [T](query: Query[T], cols: varargs[string]): Query[T] =
+  result = query
+  for col in cols:
+    let trimmed = col.strip()
+    if trimmed.len == 0:
+      raise newException(ValueError, "Raw column expression cannot be empty")
+    result.rawSelectedColumns.add(trimmed)
+
+proc fromRaw* [T](query: Query[T], tableExpr: string): Query[T] =
+  let trimmed = tableExpr.strip()
+  if trimmed.len == 0:
+    raise newException(ValueError, "FROM expression cannot be empty")
+  result = query
+  result.table = trimmed
+  result.tableIsRaw = true
+
+proc joinKeyword(joinType: JoinType): string =
+  case joinType
+  of jtInner:
+    "INNER JOIN"
+  of jtLeft:
+    "LEFT JOIN"
+  of jtRight:
+    "RIGHT JOIN"
+  of jtFull:
+    "FULL JOIN"
+  of jtCross:
+    "CROSS JOIN"
+
+proc join* [T](
+  query: Query[T],
+  table: string,
+  onClause: string,
+  joinType: JoinType = jtInner,
+  rawTable = false
+): Query[T] =
+  let tableExpr = table.strip()
+  let onExpr = onClause.strip()
+  if tableExpr.len == 0:
+    raise newException(ValueError, "JOIN table cannot be empty")
+  if joinType != jtCross and onExpr.len == 0:
+    raise newException(ValueError, "JOIN ON clause cannot be empty")
+
+  result = query
+  let renderedTable = if rawTable: tableExpr else: query.dialect.quoteIdent(tableExpr)
+  var clause = joinKeyword(joinType) & " " & renderedTable
+  if joinType != jtCross:
+    clause.add(" ON " & onExpr)
+  result.joinClauses.add(clause)
+
+proc leftJoin* [T](
+  query: Query[T],
+  table: string,
+  onClause: string,
+  rawTable = false
+): Query[T] =
+  query.join(table, onClause, jtLeft, rawTable)
+
+proc joinRaw* [T](query: Query[T], clause: string): Query[T] =
+  let trimmed = clause.strip()
+  if trimmed.len == 0:
+    raise newException(ValueError, "Raw JOIN clause cannot be empty")
+  result = query
+  result.joinClauses.add(trimmed)
 
 proc whereRaw* [T](query: Query[T], clause: string, args: openArray[SqlValue] = []): Query[T] =
   result = query
@@ -105,13 +189,22 @@ proc build* [T](query: Query[T]): SqlStatement =
   if query.table.len == 0:
     raise newException(ValueError, "Query table name is empty")
 
+  var selectParts: seq[string]
+  for col in query.selectedColumns:
+    selectParts.add(query.dialect.quoteIdent(col))
+  for expr in query.rawSelectedColumns:
+    selectParts.add(expr)
+
   let selectPart =
-    if query.selectedColumns.len == 0:
+    if selectParts.len == 0:
       "*"
     else:
-      query.selectedColumns.mapIt(query.dialect.quoteIdent(it)).join(", ")
+      selectParts.join(", ")
 
   var sql = "SELECT " & selectPart & " FROM " & query.quotedTableName()
+
+  if query.joinClauses.len > 0:
+    sql.add(" " & query.joinClauses.join(" "))
 
   if query.whereClauses.len > 0:
     sql.add(" WHERE " & query.whereClauses.join(" AND "))

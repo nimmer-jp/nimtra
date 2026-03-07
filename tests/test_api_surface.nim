@@ -34,3 +34,22 @@ suite "public api":
     var db: LibSQLConnection
     check compiles(db.findById(User, "user_123"))
     check compiles(db.deleteById(User, "user_123"))
+
+  test "query openArray overload compiles":
+    var db: LibSQLConnection
+    check compiles(db.query("SELECT 1"))
+    check compiles(db.query("SELECT ?", [toSqlValue(1)]))
+
+  test "upsert api compiles":
+    var db: LibSQLConnection
+    let user = User(id: 1, age: 20, status: "active")
+    check compiles(db.upsert(user, ["id"]))
+    check compiles(db.upsert(user, "id"))
+
+  test "join api compiles":
+    let stmt = select(User)
+      .columnsRaw("\"users\".\"id\"", "\"profiles\".\"bio\"")
+      .join("profiles", "\"profiles\".\"userId\" = \"users\".\"id\"")
+      .build()
+    check stmt.sql ==
+      "SELECT \"users\".\"id\", \"profiles\".\"bio\" FROM \"users\" INNER JOIN \"profiles\" ON \"profiles\".\"userId\" = \"users\".\"id\""
