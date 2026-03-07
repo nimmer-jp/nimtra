@@ -1,6 +1,46 @@
-# nimtra
+<div align="center">
+  <h1>nimtra</h1>
+  <p><strong>Async-first ORM and libSQL client for Nim</strong></p>
+  <p>モデル定義、クエリビルダ、マイグレーション、Turso/libSQL 接続を 1 パッケージにまとめた Nim 向け ORM 基盤です。</p>
+  <p>
+    <img alt="Nim >= 2.2.0" src="https://img.shields.io/badge/Nim-%3E%3D%202.2.0-FFC200?style=flat-square&logo=nim&logoColor=111827">
+    <img alt="version 0.1.2" src="https://img.shields.io/badge/version-0.1.2-111827?style=flat-square">
+    <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-059669?style=flat-square">
+  </p>
+  <p>
+    <a href="#why-nimtra">Why</a> ·
+    <a href="#install">Install</a> ·
+    <a href="#quick-start">Quick Start</a> ·
+    <a href="#migrations">Migrations</a> ·
+    <a href="#cli-workflow">CLI</a> ·
+    <a href="#development">Development</a>
+  </p>
+</div>
 
-`nimtra` is an async-first ORM foundation for Nim with a native libSQL (Turso) HTTP driver.
+## Why nimtra
+
+`nimtra` は、Nim で Turso/libSQL を扱うときに必要になりやすい層をまとめて提供します。HTTP ドライバだけでも、ORM だけでもなく、その間の移行コストまで含めて扱えるのが狙いです。
+
+- Async-first な libSQL HTTP ドライバ
+- `where(it.age >= 18)` のような compile-time 指向のクエリ記述
+- モデルからの schema SQL 生成と migration 実行
+- SQL ファイル管理にも対応した drizzle-like CLI
+- TLS が不安定な環境でも使いやすい `curl` フォールバック
+- ローカルレプリカ向けの native `libsql` sync hook
+
+## Feature Snapshot
+
+| Layer | Highlights |
+| --- | --- |
+| Driver | `openLibSQL`, `openLibSQLEnv`, `execute`, `query`, `executeBatch`, `close` |
+| Connection helpers | `withLibSQL`, `withLibSQLEnv`, retry config, curl transport fallback |
+| Query builder | `select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `where`, `orderBy`, `limit`, `offset`, `paginate`, `count`, `exists` |
+| CRUD | `insert`, `upsert`, `upsertReturningId`, `updateById`, `deleteById`, `findById`, `findAll`, `existsById` |
+| Mapper | `rowToModel`, `rowsToModels`, `allModels`, `firstModel`, `findByIdModel` |
+| Schema | `modelMeta`, `createTableSql`, `createSchemaSql` |
+| Migration | `newMigration`, `migrationFromModel`, `migrate`, `migrateTo`, `pendingMigrations`, `verifyMigrationHistory` |
+| Schema diff | `tableSnapshot`, `planModelDiff`, `ensureModelSchemaDiff` |
+| Embedded sync | `openLibSQLWithEmbeddedSync`, `sync()` |
 
 ## Install
 
@@ -8,34 +48,21 @@
 nimble install nimtra
 ```
 
-`nimtra` is published as a hybrid package, so one install gives you both:
+`nimtra` は hybrid package として公開されています。1 回のインストールで次が入ります。
 
-- the library modules (`import nimtra`)
-- the migration CLI binaries (`nimtra`, `nimtra_cli`)
+- ライブラリ本体: `import nimtra`
+- CLI バイナリ: `nimtra`, `nimtra_cli`
 
-## Implemented
+環境変数で接続する場合は以下がデフォルトです。
 
-- Async libSQL HTTP pipeline driver (`openLibSQL`, `execute`, `query`, `close`)
-- Batch execution (`executeBatch`) for transaction-safe multi-statement flows
-- Connection helpers (`openLibSQLEnv`, `withLibSQL`, `withLibSQLEnv`) and retry config
-- HTTP transport fallback to `curl` for environments where Nim TLS handshake is unavailable/unstable
-- Hrana-like typed value encode/decode and result parsing
-- Dialect abstraction (`SQLite`, `Postgres`, `MySQL`) with placeholder rewriting
-- Compile-time `where` macro:
-  - Example: `select(User).where(it.age >= 18 and it.status == "active")`
-- Query builder (`select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `joinRaw`, `where`, `LIKE` helpers via `contains` / `startsWith` / `endsWith` / `like`, multi-`orderBy`, `limit`, `offset`, `paginate`, `all`, `first`, `oneRow`, `count`, `exists`)
-- Basic CRUD helpers (`insert`, `upsert`, `upsertReturningId`, `updateById`, `deleteById`, `findById`, `findAll`, `findAllModels`, `existsById`)
-- Row-to-model mapping (`rowToModel`, `rowsToModels`, `allModels`, `firstModel`, `findByIdModel`) with snake_case/case-insensitive column matching
-- Model pragmas and compile-time metadata extraction (`modelMeta`) including exported model/field symbols
-- Schema SQL generation from models (`createTableSql`, `createSchemaSql`)
-- Migration manager (`newMigration`, `migrationFromModel`, `migrate`)
-- Migration safety helpers (`migrationChecksum`, `listAppliedMigrations`, `pendingMigrations`, `verifyMigrationHistory`, `migrateTo`)
-- CLI for migration workflows (`nimtra_cli migrate new/status/up/to/verify/list`)
-- Schema diff planner (`tableSnapshot`, `planModelDiff`, `ensureModelSchemaDiff`)
-- Migration warning persistence (`_nimtra_migrations.warnings` as JSON array)
-- Native libSQL C replica sync hook (`libsql_embedded`)
+```bash
+export TURSO_DATABASE_URL="libsql://your-db.turso.io"
+export TURSO_AUTH_TOKEN="YOUR_TOKEN"
+```
 
-## Quick example
+`TURSO_URL` / `TURSO_TOKEN` も fallback alias として扱えます。
+
+## Quick Start
 
 ```nim
 import std/asyncdispatch
@@ -51,11 +78,15 @@ type
 proc main() {.async.} =
   let db = await openLibSQLEnv()
 
-  discard await db.insert(User(name: "Alice", email: "alice@example.com", age: 22))
+  discard await db.insert(User(
+    name: "Alice",
+    email: "alice@example.com",
+    age: 22
+  ))
 
   let users = await db
     .select(User)
-    .where(it.age >= 18 and it.email != nil)
+    .where(it.age >= 18)
     .orderBy("age", descending = true)
     .paginate(page = 1, perPage = 20)
     .allModels()
@@ -66,7 +97,9 @@ proc main() {.async.} =
 waitFor main()
 ```
 
-## Schema and migration example
+## Migrations
+
+モデル定義からそのまま migration を作る構成です。小さく始めるならこの流れが最短です。
 
 ```nim
 import std/asyncdispatch
@@ -86,13 +119,12 @@ proc main() {.async.} =
 
   let migration = migrationFromModel(User, 2026030701, migrationName = "create_users")
   await db.migrate([migration])
-
   await db.close()
 
 waitFor main()
 ```
 
-## Migration status and checksum verification
+Migration の適用状況や checksum 検証も API から扱えます。
 
 ```nim
 let applied = await db.listAppliedMigrations()
@@ -101,10 +133,11 @@ await db.verifyMigrationHistory([m1, m2, m3], allowUnknownApplied = false)
 await db.migrateTo([m1, m2, m3], targetVersion = 2)
 ```
 
-## CLI migration workflow
+## CLI Workflow
 
-`drizzle`のように、SQLファイルをディレクトリで管理してCLI実行できます。  
-推奨構成:
+SQL ファイルをディレクトリで管理する drizzle-like な運用にも対応しています。
+
+利用できる subcommand は `new`, `status`, `up`, `to`, `verify`, `list` です。
 
 ```text
 db/
@@ -112,8 +145,6 @@ db/
     20260307120000_create_users.sql
     20260307121000_add_user_index.sql
 ```
-
-CLI例:
 
 ```bash
 # 0) インストール
@@ -132,14 +163,22 @@ nimtra migrate up
 nimtra migrate to 20260307121000
 ```
 
-主なオプション:
-- `--dir` (`db/migrations` がデフォルト)
-- `--table` (`_nimtra_migrations` がデフォルト)
-- `--url`, `--token`（未指定時は `TURSO_*` 環境変数）
-- `--prefer-curl`, `--strict`
-- 互換コマンドとして `nimtra_cli` も利用可能
+主なオプションは次のとおりです。
 
-## Auto diff migration (from current DB schema)
+| Option | Meaning |
+| --- | --- |
+| `--dir`, `-d` | Migration SQL directory. デフォルトは `db/migrations` |
+| `--table`, `-t` | Migration table 名. デフォルトは `_nimtra_migrations` |
+| `--url`, `--token` | 接続先を環境変数より優先して上書き |
+| `--prefer-curl` | `curl` transport を優先して使用 |
+| `--strict` | 厳密な verification を有効化 |
+| `--version`, `-v` | `migrate new` 作成時の version を明示 |
+
+互換コマンドとして `nimtra_cli` も利用できます。
+
+## Auto Diff From Current DB Schema
+
+既存 DB とモデル定義の差分を見て、追加 SQL や rebuild が必要かを確認できます。
 
 ```nim
 import std/asyncdispatch
@@ -167,7 +206,9 @@ proc main() {.async.} =
 waitFor main()
 ```
 
-## Native embedded sync hook (libsql C API)
+## Native Embedded Sync Hook
+
+ローカルレプリカや embedded 運用では、`libsql` C API の sync hook を使えます。
 
 ```nim
 import std/asyncdispatch
@@ -178,26 +219,37 @@ proc main() {.async.} =
     url = "libsql://your-db.turso.io",
     replicaPath = "local.db",
     authToken = "YOUR_TOKEN",
-    # set this when auto-loading fails:
     # libraryPath = "/opt/homebrew/lib/libsql.dylib"
   )
 
-  # Uses libsql_database_sync() under the hood
   await db.sync()
   await db.close()
 
 waitFor main()
 ```
 
-## Test
+## Development
 
 ```bash
 nimble test
 ```
 
-## Publish to Nimble
+<details>
+  <summary>Operational notes</summary>
 
-Nimble は Git タグを配布単位として扱います。公開時は次の流れです。
+- `sync()` は `syncHook` を優先し、未指定なら `syncUrl`、さらに未指定なら軽量な `SELECT 1` checkpoint を実行します。
+- HTTP retry は transport error と `408` / `429` / `5xx` response に適用されます。
+- `useCurlFallback = true` は Nim 側 HTTP/TLS transport が失敗したときに `curl` を使って再試行します。
+- `preferCurlTransport = true` は全リクエストで `curl` transport を使います。
+- `openLibSQLEnv` は `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` を優先し、`TURSO_URL` / `TURSO_TOKEN` も fallback として受け付けます。
+- `autoRebuild = false` は安全寄りの差分適用に留め、`autoRebuild = true` は SQLite の table rebuild flow を生成します。
+- 適用済み migration には deterministic な `checksum` が保存され、`pendingMigrations` と `verifyMigrationHistory` で drift を検出できます。
+- Embedded sync には `libsql.dylib` / `libsql.so` / `libsql.dll` のいずれかが必要です。自動検出できない場合は `libraryPath` を指定してください。
+
+</details>
+
+<details>
+  <summary>Release flow</summary>
 
 ```bash
 git tag v0.1.0
@@ -212,26 +264,4 @@ nimble --nimbleDir:.nimble-publish-test install -y
 nimble --nimbleDir:.nimble-publish-test build -y
 ```
 
-## Notes
-
-- `sync()` behavior:
-  - If `syncHook` is supplied in `openLibSQL`, nimtra calls that hook (recommended for embedded/local replica integration).
-  - If `syncUrl` is supplied, nimtra sends `POST` to that endpoint (or to `syncPath` when URL has no path).
-  - If neither is supplied, `sync()` runs a lightweight `SELECT 1` checkpoint.
-- HTTP driver currently targets the `/v2/pipeline` flow first.
-- HTTP retry behavior:
-  - `openLibSQL` supports `maxRetries` and `retryBackoffMs`.
-  - Retries are applied on transport errors and `408/429/5xx` responses.
-  - `useCurlFallback = true` (default) retries via `curl` when Nim HTTP/TLS transport fails.
-  - `preferCurlTransport = true` forces `curl` transport for all requests.
-- Environment helper names:
-  - `openLibSQLEnv` reads `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` by default.
-  - It also accepts `TURSO_URL` / `TURSO_TOKEN` as fallback aliases.
-- Schema diff notes:
-  - `autoRebuild = false` keeps migration conservative and only applies compatible changes (e.g. add column/index).
-  - `autoRebuild = true` generates a SQLite rebuild flow (`CREATE temp -> copy -> drop -> rename`) for incompatible changes.
-- Migration history notes:
-  - Applied rows now keep a deterministic `checksum` to detect local-vs-applied migration drift (`pendingMigrations` / `verifyMigrationHistory`).
-- Embedded sync notes:
-  - Requires `libsql` shared library installed (`libsql.dylib` / `libsql.so` / `libsql.dll`).
-  - Pass `libraryPath` explicitly if auto-discovery cannot find your library.
+</details>
