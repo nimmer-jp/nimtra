@@ -238,10 +238,29 @@ proc extractFieldName(node: NimNode): string {.compileTime.} =
   case node.kind
   of nnkIdent, nnkSym:
     $node
+  of nnkPostfix:
+    if node.len >= 2:
+      extractFieldName(node[1])
+    else:
+      ""
   of nnkPragmaExpr:
     extractFieldName(node[0])
   else:
     ""
+
+proc resolveTypeDefNode(typeNode: NimNode): NimNode {.compileTime.} =
+  let directImpl = typeNode.getImpl
+  if directImpl.kind == nnkTypeDef:
+    return directImpl
+
+  let typeInst = typeNode.getTypeInst
+  if typeInst.kind == nnkBracketExpr and typeInst.len >= 2:
+    let candidate = typeInst[^1]
+    let candidateImpl = candidate.getImpl
+    if candidateImpl.kind == nnkTypeDef:
+      return candidateImpl
+
+  error("Could not resolve model type for where()", typeNode)
 
 proc objectFields(typeImpl: NimNode): seq[string] {.compileTime.} =
   var ty = typeImpl[2]
@@ -261,10 +280,7 @@ proc objectFields(typeImpl: NimNode): seq[string] {.compileTime.} =
         result.add(name)
 
 proc modelFieldNames(modelType: NimNode): seq[string] {.compileTime.} =
-  let impl = modelType.getImpl
-  if impl.kind != nnkTypeDef:
-    error("Could not resolve model type for where()", modelType)
-  objectFields(impl)
+  objectFields(resolveTypeDefNode(modelType))
 
 proc isModelField(node: NimNode): bool {.compileTime.} =
   node.kind == nnkDotExpr and
@@ -323,10 +339,61 @@ proc compileComparison(node: NimNode, fields: seq[string]): CompiledPredicate {.
 
   error("A comparison must include at least one model field like it.field", node)
 
+proc compileLikeCall(node: NimNode, fields: seq[string]): CompiledPredicate {.compileTime.} =
+  proc ensureField(name: string) {.compileTime.} =
+    if name notin fields:
+      error("Unknown field '" & name & "' in where()", node)
+
+  var methodName = ""
+  var fieldExpr: NimNode = nil
+  var argExpr: NimNode = nil
+
+  if node.len == 2 and node[0].kind == nnkDotExpr:
+    let callee = node[0]
+    if callee.len == 2 and isModelField(callee[0]):
+      methodName = $callee[1]
+      fieldExpr = callee[0]
+      argExpr = node[1]
+  elif node.len == 3 and node[0].kind in {nnkIdent, nnkSym} and isModelField(node[1]):
+    methodName = $node[0]
+    fieldExpr = node[1]
+    argExpr = node[2]
+
+  if fieldExpr.isNil or argExpr.isNil:
+    error("LIKE helpers must be called on a model field like it.title.contains(term)", node)
+
+  let fieldName = $fieldExpr[1]
+  ensureField(fieldName)
+
+  result.sql = escapeField(fieldName) & " LIKE ?"
+
+  case methodName
+  of "contains":
+    result.args = @[
+      quote do:
+        "%" & $`argExpr` & "%"
+    ]
+  of "startsWith":
+    result.args = @[
+      quote do:
+        $`argExpr` & "%"
+    ]
+  of "endsWith":
+    result.args = @[
+      quote do:
+        "%" & $`argExpr`
+    ]
+  of "like":
+    result.args = @[argExpr]
+  else:
+    error("Unsupported call in where(): " & methodName, node)
+
 proc compilePredicate(node: NimNode, fields: seq[string]): CompiledPredicate {.compileTime.} =
   case node.kind
   of nnkPar:
     result = compilePredicate(node[0], fields)
+  of nnkCall:
+    result = compileLikeCall(node, fields)
   of nnkInfix:
     let op = $node[0]
     case op

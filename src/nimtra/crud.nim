@@ -147,6 +147,17 @@ proc upsertInternal[T](
 
   await db.execute(sql, params)
 
+proc upsertReturningIdInternal[T](
+  db: LibSQLConnection,
+  entity: T,
+  conflictFields: seq[string],
+  updateFields: seq[string],
+  tableName = "",
+  idField = "id"
+): Future[Option[int64]] {.async.} =
+  let res = await upsertInternal(db, entity, conflictFields, updateFields, tableName, idField)
+  res.lastInsertRowId
+
 proc upsert* [T](
   db: LibSQLConnection,
   entity: T,
@@ -170,11 +181,11 @@ proc upsert* [T](
   updateFields: openArray[string] = [],
   tableName = "",
   idField = "id"
-): Future[SqlResult] {.async.} =
+): Future[SqlResult] =
   var updateCopy = newSeqOfCap[string](updateFields.len)
   for field in updateFields:
     updateCopy.add(field)
-  await upsertInternal(db, entity, @[conflictField], updateCopy, tableName, idField)
+  upsertInternal(db, entity, @[conflictField], updateCopy, tableName, idField)
 
 proc upsertReturningId* [T](
   db: LibSQLConnection,
@@ -183,9 +194,14 @@ proc upsertReturningId* [T](
   updateFields: openArray[string] = [],
   tableName = "",
   idField = "id"
-): Future[Option[int64]] {.async.} =
-  let res = await db.upsert(entity, conflictFields, updateFields, tableName, idField)
-  res.lastInsertRowId
+): Future[Option[int64]] =
+  var conflictCopy = newSeqOfCap[string](conflictFields.len)
+  for field in conflictFields:
+    conflictCopy.add(field)
+  var updateCopy = newSeqOfCap[string](updateFields.len)
+  for field in updateFields:
+    updateCopy.add(field)
+  upsertReturningIdInternal(db, entity, conflictCopy, updateCopy, tableName, idField)
 
 proc insertReturningId* [T](
   db: LibSQLConnection,

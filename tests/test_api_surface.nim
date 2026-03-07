@@ -1,4 +1,4 @@
-import std/unittest
+import std/[asyncdispatch, unittest]
 
 import ../src/nimtra
 
@@ -45,6 +45,13 @@ suite "public api":
     let user = User(id: 1, age: 20, status: "active")
     check compiles(db.upsert(user, ["id"]))
     check compiles(db.upsert(user, "id"))
+
+  test "upsert api compiles in async context":
+    check compiles(
+      proc (db: LibSQLConnection) {.async.} =
+        let user = User(id: 1, age: 20, status: "active")
+        discard await db.upsert(user, "id")
+    )
 
   test "join api compiles":
     let stmt = select(User)

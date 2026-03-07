@@ -52,6 +52,11 @@ proc extractFieldName(node: NimNode): string {.compileTime.} =
   case node.kind
   of nnkIdent, nnkSym:
     $node
+  of nnkPostfix:
+    if node.len >= 2:
+      extractFieldName(node[1])
+    else:
+      ""
   of nnkPragmaExpr:
     extractFieldName(node[0])
   else:

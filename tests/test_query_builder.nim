@@ -1,6 +1,7 @@
 import std/unittest
 
 import ../src/nimtra/[model, query_builder, values]
+import ./support_models
 
 type
   User = ref object
@@ -61,6 +62,27 @@ suite "query builder":
   test "uses table pragma name by default":
     let stmt = select(AuditLog).build()
     check stmt.sql == "SELECT * FROM \"audit_log_entries\""
+
+  test "supports imported models with exported fields in typed where":
+    let normalized = "alice@example.com"
+    let stmt = select(UserRecord).where(it.email == normalized).build()
+
+    check stmt.sql == "SELECT * FROM \"users\" WHERE \"email\" = ?"
+    check stmt.params.len == 1
+    check stmt.params[0].kind == svText
+    check stmt.params[0].textValue == normalized
+
+  test "supports LIKE helpers in typed where":
+    let stmt =
+      select(DocumentRecord)
+        .where(it.title.contains("draft") or it.content.like("%nimtra%"))
+        .build()
+
+    check stmt.sql ==
+      "SELECT * FROM \"documents\" WHERE (\"title\" LIKE ? OR \"content\" LIKE ?)"
+    check stmt.params.len == 2
+    check stmt.params[0].textValue == "%draft%"
+    check stmt.params[1].textValue == "%nimtra%"
 
   test "builds join clauses and raw projections":
     let stmt =

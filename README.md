@@ -23,10 +23,10 @@ nimble install nimtra
 - Dialect abstraction (`SQLite`, `Postgres`, `MySQL`) with placeholder rewriting
 - Compile-time `where` macro:
   - Example: `select(User).where(it.age >= 18 and it.status == "active")`
-- Query builder (`select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `joinRaw`, `where`, multi-`orderBy`, `limit`, `offset`, `paginate`, `all`, `first`, `oneRow`, `count`, `exists`)
+- Query builder (`select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `joinRaw`, `where`, `LIKE` helpers via `contains` / `startsWith` / `endsWith` / `like`, multi-`orderBy`, `limit`, `offset`, `paginate`, `all`, `first`, `oneRow`, `count`, `exists`)
 - Basic CRUD helpers (`insert`, `upsert`, `upsertReturningId`, `updateById`, `deleteById`, `findById`, `findAll`, `findAllModels`, `existsById`)
 - Row-to-model mapping (`rowToModel`, `rowsToModels`, `allModels`, `firstModel`, `findByIdModel`) with snake_case/case-insensitive column matching
-- Model pragmas and compile-time metadata extraction (`modelMeta`)
+- Model pragmas and compile-time metadata extraction (`modelMeta`) including exported model/field symbols
 - Schema SQL generation from models (`createTableSql`, `createSchemaSql`)
 - Migration manager (`newMigration`, `migrationFromModel`, `migrate`)
 - Migration safety helpers (`migrationChecksum`, `listAppliedMigrations`, `pendingMigrations`, `verifyMigrationHistory`, `migrateTo`)

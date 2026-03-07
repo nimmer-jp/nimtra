@@ -1,6 +1,7 @@
 import std/unittest
 
 import ../src/nimtra/[model, schema]
+import ./support_models
 
 type
   User {.table: "app_users".} = ref object
@@ -21,3 +22,8 @@ suite "schema sql generation":
     check statements.len == 2
     check statements[1] ==
       "CREATE INDEX IF NOT EXISTS \"idx_app_users_age\" ON \"app_users\" (\"age\")"
+
+  test "supports exported model fields in schema generation":
+    let sql = createTableSql(UserRecord)
+    check sql ==
+      "CREATE TABLE IF NOT EXISTS \"users\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \"email\" TEXT UNIQUE)"

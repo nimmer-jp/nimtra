@@ -1,6 +1,7 @@
 import std/[strutils, unittest]
 
 import ../src/nimtra/[migrations, model]
+import ./support_models
 
 type
   User = ref object
@@ -41,3 +42,8 @@ suite "migrations":
     check m.name.len > 0
     check m.statements.len == 1
     check m.statements[0].sql.contains("CREATE TABLE")
+
+  test "builds migration for exported model fields":
+    let m = migrationFromModel(UserRecord, 2026030702)
+    check m.statements.len == 1
+    check m.statements[0].sql.contains("\"email\" TEXT UNIQUE")

@@ -1,6 +1,7 @@
 import std/[options, unittest]
 
 import ../src/nimtra/model
+import ./support_models
 
 type
   User {.table: "app_users".} = ref object
@@ -37,3 +38,13 @@ suite "model metadata":
   test "resolves model table name":
     check modelTableName(User) == "app_users"
     check modelTableName(Session) == "sessions"
+
+  test "extracts exported fields from exported models":
+    let meta = modelMeta(UserRecord)
+    check meta.name == "UserRecord"
+    check meta.table == "users"
+    check meta.fields.len == 2
+    check meta.fields[0].name == "id"
+    check meta.fields[0].primary
+    check meta.fields[1].name == "email"
+    check meta.fields[1].unique
