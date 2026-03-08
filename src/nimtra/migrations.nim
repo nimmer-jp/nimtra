@@ -137,40 +137,73 @@ proc rowInt(row: SqlRow, keys: openArray[string]): int64 =
     return 0'i64
   value.get().asInt64()
 
+method ensureMigrationsTableImpl*(dialect: Dialect, db: DbConnection, tableName: string): Future[void] {.base, async.} =
+  raise newException(NimtraDbError, "ensureMigrationsTableImpl not implemented for this dialect")
+
+method ensureMigrationsTableImpl*(dialect: SQLiteDialect, db: DbConnection, tableName: string): Future[void] {.async.} =
+  let table = dialect.quoteIdent(tableName)
+  let warningsCol = dialect.quoteIdent("warnings")
+  let checksumCol = dialect.quoteIdent("checksum")
+  let sql = "CREATE TABLE IF NOT EXISTS " & table & " (" &
+    dialect.quoteIdent("version") & " INTEGER PRIMARY KEY, " &
+    dialect.quoteIdent("name") & " TEXT NOT NULL, " &
+    checksumCol & " TEXT NOT NULL DEFAULT '', " &
+    warningsCol & " TEXT NOT NULL DEFAULT '[]', " &
+    dialect.quoteIdent("applied_at") & " TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP" &
+    ")"
+  discard await db.execute(sql)
+
+  var hasWarnings = false
+  var hasChecksum = false
+  let pragmaRes = await db.query("PRAGMA table_info(" & table & ")")
+  for row in pragmaRes.rows:
+    let colName = rowString(row, ["name"]).toLowerAscii()
+    if colName == "warnings":
+      hasWarnings = true
+    elif colName == "checksum":
+      hasChecksum = true
+  if not hasWarnings:
+    let alterSql = "ALTER TABLE " & table & " ADD COLUMN " &
+      warningsCol & " TEXT NOT NULL DEFAULT '[]'"
+    discard await db.execute(alterSql)
+  if not hasChecksum:
+    let alterSql = "ALTER TABLE " & table & " ADD COLUMN " &
+      checksumCol & " TEXT NOT NULL DEFAULT ''"
+    discard await db.execute(alterSql)
+
+method ensureMigrationsTableImpl*(dialect: PostgresDialect, db: DbConnection, tableName: string): Future[void] {.async.} =
+  let table = dialect.quoteIdent(tableName)
+  let warningsCol = dialect.quoteIdent("warnings")
+  let checksumCol = dialect.quoteIdent("checksum")
+  let sql = "CREATE TABLE IF NOT EXISTS " & table & " (" &
+    dialect.quoteIdent("version") & " BIGINT PRIMARY KEY, " &
+    dialect.quoteIdent("name") & " TEXT NOT NULL, " &
+    checksumCol & " TEXT NOT NULL DEFAULT '', " &
+    warningsCol & " TEXT NOT NULL DEFAULT '[]', " &
+    dialect.quoteIdent("applied_at") & " TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP" &
+    ")"
+  discard await db.execute(sql)
+
+  var hasWarnings = false
+  var hasChecksum = false
+  let checkSql = "SELECT column_name FROM information_schema.columns WHERE table_name = ?"
+  let colsRes = await db.query(checkSql, @[toSqlValue(tableName)])
+  for row in colsRes.rows:
+    let colName = rowString(row, ["column_name"]).toLowerAscii()
+    if colName == "warnings":
+      hasWarnings = true
+    elif colName == "checksum":
+      hasChecksum = true
+  if not hasWarnings:
+    discard await db.execute("ALTER TABLE " & table & " ADD COLUMN " & warningsCol & " TEXT NOT NULL DEFAULT '[]'")
+  if not hasChecksum:
+    discard await db.execute("ALTER TABLE " & table & " ADD COLUMN " & checksumCol & " TEXT NOT NULL DEFAULT ''")
+
 proc ensureMigrationsTable*(
   db: DbConnection,
   tableName = DefaultMigrationsTable
 ): Future[void] {.async.} =
-  let table = db.dialect.quoteIdent(tableName)
-  let warningsCol = db.dialect.quoteIdent("warnings")
-  let checksumCol = db.dialect.quoteIdent("checksum")
-  let sql = "CREATE TABLE IF NOT EXISTS " & table & " (" &
-    db.dialect.quoteIdent("version") & " INTEGER PRIMARY KEY, " &
-    db.dialect.quoteIdent("name") & " TEXT NOT NULL, " &
-    checksumCol & " TEXT NOT NULL DEFAULT '', " &
-    warningsCol & " TEXT NOT NULL DEFAULT '[]', " &
-    db.dialect.quoteIdent("applied_at") & " TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP" &
-    ")"
-  discard await db.execute(sql)
-
-  if db.dialect.name() == "sqlite":
-    var hasWarnings = false
-    var hasChecksum = false
-    let pragmaRes = await db.query("PRAGMA table_info(" & table & ")")
-    for row in pragmaRes.rows:
-      let colName = rowString(row, ["name"]).toLowerAscii()
-      if colName == "warnings":
-        hasWarnings = true
-      elif colName == "checksum":
-        hasChecksum = true
-    if not hasWarnings:
-      let alterSql = "ALTER TABLE " & table & " ADD COLUMN " &
-        warningsCol & " TEXT NOT NULL DEFAULT '[]'"
-      discard await db.execute(alterSql)
-    if not hasChecksum:
-      let alterSql = "ALTER TABLE " & table & " ADD COLUMN " &
-        checksumCol & " TEXT NOT NULL DEFAULT ''"
-      discard await db.execute(alterSql)
+  await ensureMigrationsTableImpl(db.dialect, db, tableName)
 
 proc listAppliedMigrations*(
   db: DbConnection,
@@ -207,21 +240,17 @@ proc appliedMigrationVersions*(
   for migration in applied:
     result.incl(migration.version)
 
-proc tableSnapshot*(
-  db: DbConnection,
-  tableName: string
-): Future[Option[TableSnapshot]] {.async.} =
-  if db.dialect.name() != "sqlite":
-    raise newException(NimtraDbError, "tableSnapshot() currently supports sqlite/libSQL dialect only")
+method getTableSnapshotImpl*(dialect: Dialect, db: DbConnection, tableName: string): Future[Option[TableSnapshot]] {.base, async.} =
+  raise newException(NimtraDbError, "getTableSnapshotImpl not implemented for this dialect")
 
-  let existsSql =
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1"
+method getTableSnapshotImpl*(dialect: SQLiteDialect, db: DbConnection, tableName: string): Future[Option[TableSnapshot]] {.async.} =
+  let existsSql = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1"
   let existsRes = await db.query(existsSql, @[toSqlValue(tableName)])
   if existsRes.rows.len == 0:
     return none(TableSnapshot)
 
   var snapshot = TableSnapshot(table: tableName)
-  let tableIdent = db.dialect.quoteIdent(tableName)
+  let tableIdent = dialect.quoteIdent(tableName)
 
   let colRes = await db.query("PRAGMA table_info(" & tableIdent & ")")
   for row in colRes.rows:
@@ -241,9 +270,7 @@ proc tableSnapshot*(
   let indexListRes = await db.query("PRAGMA index_list(" & tableIdent & ")")
   for row in indexListRes.rows:
     let indexName = rowString(row, ["name"])
-    if indexName.len == 0:
-      continue
-    if indexName.startsWith("sqlite_autoindex_"):
+    if indexName.len == 0 or indexName.startsWith("sqlite_autoindex_"):
       continue
 
     var index = ExistingIndex(
@@ -252,7 +279,7 @@ proc tableSnapshot*(
     )
 
     var orderedCols: seq[tuple[seqNo: int64, column: string]]
-    let indexRes = await db.query("PRAGMA index_info(" & db.dialect.quoteIdent(indexName) & ")")
+    let indexRes = await db.query("PRAGMA index_info(" & dialect.quoteIdent(indexName) & ")")
     for idxRow in indexRes.rows:
       orderedCols.add((
         rowInt(idxRow, ["seqno"]),
@@ -266,7 +293,84 @@ proc tableSnapshot*(
 
     snapshot.indexes.add(index)
 
-  some(snapshot)
+  return some(snapshot)
+
+method getTableSnapshotImpl*(dialect: PostgresDialect, db: DbConnection, tableName: string): Future[Option[TableSnapshot]] {.async.} =
+  let existsSql = "SELECT tablename FROM pg_tables WHERE tablename = ? LIMIT 1"
+  let existsRes = await db.query(existsSql, @[toSqlValue(tableName)])
+  if existsRes.rows.len == 0:
+    return none(TableSnapshot)
+
+  var snapshot = TableSnapshot(table: tableName)
+  let colSql = """
+    SELECT column_name, data_type, is_nullable, column_default
+    FROM information_schema.columns 
+    WHERE table_name = ?
+  """
+  let colRes = await db.query(colSql, @[toSqlValue(tableName)])
+  
+  let pkSql = """
+    SELECT a.attname
+    FROM pg_index i
+    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+    WHERE i.indrelid = ?::regclass AND i.indisprimary
+  """
+  var pks: seq[string]
+  try:
+    let pkRes = await db.query(pkSql, @[toSqlValue(tableName)])
+    for row in pkRes.rows: pks.add(rowString(row, ["attname"]))
+  except CatchableError:
+    discard
+
+  for row in colRes.rows:
+    let cname = rowString(row, ["column_name"])
+    var column = ExistingColumn(
+      name: cname,
+      dbType: rowString(row, ["data_type"]).toUpperAscii(),
+      notNull: rowString(row, ["is_nullable"]).toUpperAscii() == "NO",
+      primaryKey: pks.contains(cname)
+    )
+    let defaultRaw = rowString(row, ["column_default"])
+    if defaultRaw.len > 0 and not defaultRaw.startsWith("nextval("):
+      column.defaultValue = some(defaultRaw)
+    snapshot.columns.add(column)
+
+  let indexSql = """
+    SELECT
+        i.relname AS index_name,
+        ix.indisunique AS is_unique,
+        a.attname AS column_name,
+        array_position(ix.indkey, a.attnum) as seqno
+    FROM
+        pg_class t, pg_class i, pg_index ix, pg_attribute a
+    WHERE
+        t.oid = ix.indrelid AND i.oid = ix.indexrelid AND a.attrelid = t.oid
+        AND a.attnum = ANY(ix.indkey) AND t.relkind = 'r' AND t.relname = ?
+        AND NOT ix.indisprimary
+  """
+  var idxMap = initTable[string, tuple[unique: bool, cols: seq[tuple[seqno: int, col: string]]]]()
+  let idxRes = await db.query(indexSql, @[toSqlValue(tableName)])
+  for row in idxRes.rows:
+    let iname = rowString(row, ["index_name"])
+    let is_unique = rowString(row, ["is_unique"]).toLowerAscii() in ["t", "true", "1"]
+    let cname = rowString(row, ["column_name"])
+    let seqno = int(rowInt(row, ["seqno"]))
+    if not idxMap.hasKey(iname):
+      idxMap[iname] = (is_unique, newSeq[tuple[seqno: int, col: string]]())
+    idxMap[iname].cols.add((seqno, cname))
+
+  for k, v in idxMap:
+    var cols = v.cols
+    cols.sort(proc(a, b: tuple[seqno: int, col: string]): int = cmp(a.seqno, b.seqno))
+    snapshot.indexes.add(ExistingIndex(name: k, unique: v.unique, columns: cols.mapIt(it.col)))
+
+  return some(snapshot)
+
+proc tableSnapshot*(
+  db: DbConnection,
+  tableName: string
+): Future[Option[TableSnapshot]] {.async.} =
+  return await getTableSnapshotImpl(db.dialect, db, tableName)
 
 proc normalizeType(value: string): string =
   value.strip().toUpperAscii()
@@ -318,6 +422,51 @@ proc buildRebuildStatements(
   )
   result.add(createIndexesSql(meta, dialect, ifNotExists = true, indexPrefix = indexPrefix))
 
+proc buildPostgresAlters(
+  meta: ModelMeta,
+  current: TableSnapshot,
+  dialect: Dialect
+): seq[string] =
+  let tName = dialect.quoteIdent(meta.table)
+  var existingCols: Table[string, ExistingColumn]
+  for col in current.columns:
+    existingCols[col.name.toLowerAscii()] = col
+
+  var modelCols: HashSet[string]
+  for field in meta.fields:
+    let key = field.name.toLowerAscii()
+    modelCols.incl(key)
+
+    if not existingCols.hasKey(key):
+      let addDef = columnDefinitionSql(field, dialect, includePrimaryAndUnique = true)
+      result.add("ALTER TABLE " & tName & " ADD COLUMN " & addDef)
+      continue
+
+    let existing = existingCols[key]
+    let colName = dialect.quoteIdent(field.name)
+    var dbType = field.dbType
+    if field.primary and field.autoincrement and dbType == "INTEGER":
+      dbType = "SERIAL"
+    elif dbType == "DATETIME":
+      dbType = "TIMESTAMP WITH TIME ZONE"
+
+    if normalizeType(existing.dbType) != normalizeType(dbType):
+      result.add("ALTER TABLE " & tName & " ALTER COLUMN " & colName & " TYPE " & dbType & " USING " & colName & "::" & dbType)
+
+    if field.defaultValue.isSome and existing.defaultValue.isSome:
+      if normalizeDefault(existing.defaultValue.get()) != normalizeDefault(field.defaultValue.get()):
+        let defVal = if field.defaultValue.get() == "CURRENT_TIMESTAMP": "CURRENT_TIMESTAMP" else: "'" & field.defaultValue.get().replace("'", "''") & "'"
+        result.add("ALTER TABLE " & tName & " ALTER COLUMN " & colName & " SET DEFAULT " & defVal)
+    elif field.defaultValue.isSome and existing.defaultValue.isNone:
+      let defVal = if field.defaultValue.get() == "CURRENT_TIMESTAMP": "CURRENT_TIMESTAMP" else: "'" & field.defaultValue.get().replace("'", "''") & "'"
+      result.add("ALTER TABLE " & tName & " ALTER COLUMN " & colName & " SET DEFAULT " & defVal)
+    elif field.defaultValue.isNone and existing.defaultValue.isSome:
+      result.add("ALTER TABLE " & tName & " ALTER COLUMN " & colName & " DROP DEFAULT")
+
+  for col in current.columns:
+    if col.name.toLowerAscii() notin modelCols:
+      result.add("ALTER TABLE " & tName & " DROP COLUMN " & dialect.quoteIdent(col.name))
+
 proc planSchemaDiff*(
   meta: ModelMeta,
   snapshot: Option[TableSnapshot],
@@ -333,6 +482,31 @@ proc planSchemaDiff*(
 
   let current = snapshot.get()
   var rebuildReasons: seq[string]
+
+  if d.name() == "postgres":
+    if autoRebuild:
+      result.statements = buildPostgresAlters(meta, current, d)
+    else:
+      result.warnings.add("Set autoRebuild=true to generate Postgres ALTER TABLE statements.")
+
+    for field in meta.fields:
+      if field.unique and not current.hasSingleColumnUniqueIndex(field.name):
+        result.statements.add(
+          "CREATE UNIQUE INDEX IF NOT EXISTS " &
+          d.quoteIdent("uidx_" & meta.table & "_" & field.name) &
+          " ON " & d.quoteIdent(meta.table) &
+          " (" & d.quoteIdent(field.name) & ")"
+        )
+
+    var existingIndexNames: HashSet[string]
+    for idx in current.indexes: existingIndexNames.incl(idx.name.toLowerAscii())
+
+    for field in meta.fields:
+      if field.indexed and not field.unique:
+        let indexName = (indexPrefix & "_" & meta.table & "_" & field.name).toLowerAscii()
+        if indexName notin existingIndexNames:
+          result.statements.add(createIndexSql(meta, field, d, true, indexPrefix))
+    return
 
   var existingCols: Table[string, ExistingColumn]
   for col in current.columns:

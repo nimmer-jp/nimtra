@@ -42,29 +42,54 @@ proc renderDefaultClause(field: FieldMeta): string =
   else:
     " DEFAULT " & sqlStringLiteral(raw)
 
+method columnDefinitionSqlImpl*(dialect: Dialect, field: FieldMeta, includePrimaryAndUnique: bool): string {.base.} =
+  let colName = dialect.quoteIdent(field.name)
+  result = colName & " " & field.dbType
+  if includePrimaryAndUnique and field.primary:
+    result.add(" PRIMARY KEY")
+  if includePrimaryAndUnique and field.unique:
+    result.add(" UNIQUE")
+  if field.maxLength.isSome and field.dbType == "TEXT":
+    result.add(" CHECK (length(" & colName & ") <= " & $field.maxLength.get() & ")")
+  result.add(renderDefaultClause(field))
+
+method columnDefinitionSqlImpl*(dialect: SQLiteDialect, field: FieldMeta, includePrimaryAndUnique: bool): string =
+  let colName = dialect.quoteIdent(field.name)
+  if includePrimaryAndUnique and field.primary and field.autoincrement and field.dbType == "INTEGER":
+    return colName & " INTEGER PRIMARY KEY AUTOINCREMENT"
+  result = colName & " " & field.dbType
+  if includePrimaryAndUnique and field.primary:
+    result.add(" PRIMARY KEY")
+  if includePrimaryAndUnique and field.unique:
+    result.add(" UNIQUE")
+  if field.maxLength.isSome and field.dbType == "TEXT":
+    result.add(" CHECK (length(" & colName & ") <= " & $field.maxLength.get() & ")")
+  result.add(renderDefaultClause(field))
+
+method columnDefinitionSqlImpl*(dialect: PostgresDialect, field: FieldMeta, includePrimaryAndUnique: bool): string =
+  let colName = dialect.quoteIdent(field.name)
+  var dbType = field.dbType
+  if includePrimaryAndUnique and field.primary and field.autoincrement and dbType == "INTEGER":
+    dbType = "SERIAL"
+  elif dbType == "DATETIME":
+    dbType = "TIMESTAMP WITH TIME ZONE"
+
+  result = colName & " " & dbType
+  if includePrimaryAndUnique and field.primary:
+    result.add(" PRIMARY KEY")
+  if includePrimaryAndUnique and field.unique:
+    result.add(" UNIQUE")
+  if field.maxLength.isSome and field.dbType == "TEXT":
+    result.add(" CHECK (length(" & colName & ") <= " & $field.maxLength.get() & ")")
+  result.add(renderDefaultClause(field))
+
 proc columnDefinitionSql*(
   field: FieldMeta,
   dialect: Dialect = nil,
   includePrimaryAndUnique = true
 ): string =
   let d = if dialect.isNil: newSQLiteDialect() else: dialect
-  let colName = d.quoteIdent(field.name)
-
-  if includePrimaryAndUnique and field.primary and field.autoincrement and field.dbType == "INTEGER" and d.name() == "sqlite":
-    return colName & " INTEGER PRIMARY KEY AUTOINCREMENT"
-
-  result = colName & " " & field.dbType
-
-  if includePrimaryAndUnique and field.primary:
-    result.add(" PRIMARY KEY")
-
-  if includePrimaryAndUnique and field.unique:
-    result.add(" UNIQUE")
-
-  if field.maxLength.isSome and field.dbType == "TEXT":
-    result.add(" CHECK (length(" & colName & ") <= " & $field.maxLength.get() & ")")
-
-  result.add(renderDefaultClause(field))
+  return columnDefinitionSqlImpl(d, field, includePrimaryAndUnique)
 
 proc createTableSql*(
   meta: ModelMeta,

@@ -2,3 +2,4 @@
 .env
 .nimble/
 .nimcache-tests
+libpq.dylib
