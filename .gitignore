@@ -3,3 +3,4 @@
 .nimble/
 .nimcache-tests
 libpq.dylib
+libmysqlclient.dylib

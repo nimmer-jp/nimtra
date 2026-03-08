@@ -83,6 +83,21 @@ method columnDefinitionSqlImpl*(dialect: PostgresDialect, field: FieldMeta, incl
     result.add(" CHECK (length(" & colName & ") <= " & $field.maxLength.get() & ")")
   result.add(renderDefaultClause(field))
 
+method columnDefinitionSqlImpl*(dialect: MySQLDialect, field: FieldMeta, includePrimaryAndUnique: bool): string =
+  let colName = dialect.quoteIdent(field.name)
+  var dbType = field.dbType
+  if includePrimaryAndUnique and field.primary and field.autoincrement and dbType == "INTEGER":
+    dbType = "INT AUTO_INCREMENT"
+
+  result = colName & " " & dbType
+  if includePrimaryAndUnique and field.primary:
+    result.add(" PRIMARY KEY")
+  if includePrimaryAndUnique and field.unique:
+    result.add(" UNIQUE")
+  if field.maxLength.isSome and field.dbType == "TEXT":
+    result.add(" VARCHAR(" & $field.maxLength.get() & ")") # MySQL check constraints on text are tricky, standard is varchar
+  result.add(renderDefaultClause(field))
+
 proc columnDefinitionSql*(
   field: FieldMeta,
   dialect: Dialect = nil,
