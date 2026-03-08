@@ -1,6 +1,7 @@
 import std/[asyncdispatch, dynlib, strutils]
 
 import ./libsql_http
+import ./base
 
 type
   LibsqlErrPtr = pointer
@@ -246,7 +247,7 @@ proc openLibSQLWithEmbeddedSync*(
   closeAfterExecute = true,
   webpki = false,
   synced = true
-): Future[LibSQLConnection] {.async.} =
+): Future[DbConnection] {.async.} =
   let replica = openEmbeddedReplica(
     path = replicaPath,
     primaryUrl = if primaryUrl.len > 0: primaryUrl else: url,

@@ -1,7 +1,7 @@
 import std/[asyncdispatch, macros, options, sequtils, strutils]
 
 import ./[dialects, mapper, model, values]
-import ./driver/libsql_http
+import ./driver/base
 
 type
   JoinType* = enum
@@ -12,7 +12,7 @@ type
     jtCross
 
   Query* [T] = object
-    db*: LibSQLConnection
+    db*: DbConnection
     dialect*: Dialect
     table*: string
     tableIsRaw*: bool
@@ -35,7 +35,7 @@ proc defaultModelTable[T](): string =
   modelTableName(T)
 
 proc select* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   _: typedesc[T],
   tableName = ""
 ): Query[T] =
@@ -439,7 +439,7 @@ macro where*(query: typed, predicate: untyped): untyped =
 
 proc all* [T](query: Query[T]): Future[seq[SqlRow]] {.async.} =
   if query.db.isNil:
-    raise newException(LibSQLError, "Query has no bound database. Use db.select(Model)")
+    raise newException(NimtraDbError, "Query has no bound database. Use db.select(Model)")
   let stmt = query.build()
   let res = await query.db.query(stmt)
   res.rows
@@ -482,7 +482,7 @@ proc oneModel* [T](query: Query[T]): Future[T] {.async.} =
 
 proc count* [T](query: Query[T]): Future[int] {.async.} =
   if query.db.isNil:
-    raise newException(LibSQLError, "Query has no bound database. Use db.select(Model)")
+    raise newException(NimtraDbError, "Query has no bound database. Use db.select(Model)")
 
   let built = query.build()
   let countSql = "SELECT COUNT(*) AS \"count\" FROM (" & built.sql & ") AS __nimtra_count"
@@ -495,7 +495,7 @@ proc count* [T](query: Query[T]): Future[int] {.async.} =
 
 proc exists* [T](query: Query[T]): Future[bool] {.async.} =
   if query.db.isNil:
-    raise newException(LibSQLError, "Query has no bound database. Use db.select(Model)")
+    raise newException(NimtraDbError, "Query has no bound database. Use db.select(Model)")
 
   let built = query.limit(1).build()
   let existsSql = "SELECT EXISTS(SELECT 1 FROM (" & built.sql & ") AS __nimtra_exists) AS \"exists\""

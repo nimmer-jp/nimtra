@@ -1,9 +1,10 @@
 import std/[asyncdispatch, base64, httpclient, json, options, os, osproc, streams, strutils, tables, uri]
 
 import ../[dialects, values]
+import ./base
 
 type
-  LibSQLError* = object of CatchableError
+  LibSQLError* = object of NimtraDbError
 
   SyncHook* = proc(): Future[void] {.closure.}
   SyncCloseHook* = proc() {.closure.}
@@ -22,13 +23,13 @@ type
     syncHook*: SyncHook
     syncCloseHook*: SyncCloseHook
 
-  LibSQLConnection* = ref object
+  LibSQLConnection* = ref object of DbConnection
     config*: LibSQLConfig
     client*: AsyncHttpClient
     pipelineUrl*: string
     baton*: Option[string]
     baseUrl*: Option[string]
-    dialect*: Dialect
+
 
 proc makePipelineUrl(url: string): string =
   var normalized = url.strip()
@@ -378,7 +379,7 @@ proc openLibSQL*(
   preferCurlTransport = false,
   syncHook: SyncHook = nil,
   syncCloseHook: SyncCloseHook = nil
-): Future[LibSQLConnection] {.async.} =
+): Future[DbConnection] {.async.} =
   var client = newAsyncHttpClient()
   client.timeout = timeoutMs
 
@@ -409,12 +410,12 @@ proc executeBatchInternal(
   statements: seq[SqlStatement]
 ): Future[seq[SqlResult]]
 
-proc executeBatch*(
+method executeBatch*(
   db: LibSQLConnection,
   statements: openArray[SqlStatement]
-): Future[seq[SqlResult]]
+): Future[seq[SqlResult]] {.async.}
 
-proc execute*(
+method execute*(
   db: LibSQLConnection,
   statement: SqlStatement
 ): Future[SqlResult] {.async.} =
@@ -423,7 +424,7 @@ proc execute*(
     raise newException(LibSQLError, "No execute result found for statement")
   results[0]
 
-proc execute*(
+method execute*(
   db: LibSQLConnection,
   sql: string,
   args: openArray[SqlValue] = []
@@ -431,7 +432,7 @@ proc execute*(
   var params: seq[SqlValue]
   for arg in args:
     params.add(arg)
-  db.execute(SqlStatement(sql: sql, params: params))
+  return db.execute(SqlStatement(sql: sql, params: params))
 
 proc executeBatchInternal(
   db: LibSQLConnection,
@@ -462,25 +463,25 @@ proc executeBatchInternal(
     raise newException(LibSQLError, "Incomplete batch response from libSQL")
   results
 
-proc executeBatch*(
+method executeBatch*(
   db: LibSQLConnection,
   statements: openArray[SqlStatement]
 ): Future[seq[SqlResult]] =
   var copied = newSeqOfCap[SqlStatement](statements.len)
   for statement in statements:
     copied.add(statement)
-  executeBatchInternal(db, copied)
+  return executeBatchInternal(db, copied)
 
-proc query*(db: LibSQLConnection, statement: SqlStatement): Future[SqlResult] =
-  db.execute(statement.sql, statement.params)
+method query*(db: LibSQLConnection, statement: SqlStatement): Future[SqlResult] =
+  return db.execute(statement.sql, statement.params)
 
-proc query*(db: LibSQLConnection, sql: string, args: openArray[SqlValue] = []): Future[SqlResult] =
+method query*(db: LibSQLConnection, sql: string, args: openArray[SqlValue] = []): Future[SqlResult] =
   var params: seq[SqlValue]
   for arg in args:
     params.add(arg)
-  db.execute(sql, params)
+  return db.execute(sql, params)
 
-proc sync*(db: LibSQLConnection): Future[void] {.async.} =
+method sync*(db: LibSQLConnection): Future[void] {.async.} =
   if db.isNil:
     raise newException(LibSQLError, "Database handle is nil")
 
@@ -523,7 +524,7 @@ proc sync*(db: LibSQLConnection): Future[void] {.async.} =
       "sync() HTTP error " & $response.code & " from " & endpoint & ": " & responseBody
     )
 
-proc close*(db: LibSQLConnection): Future[void] {.async.} =
+method close*(db: LibSQLConnection): Future[void] {.async.} =
   if db.isNil:
     return
 
@@ -549,7 +550,7 @@ proc openLibSQLEnv*(
   closeAfterExecute = true,
   useCurlFallback = true,
   preferCurlTransport = false
-): Future[LibSQLConnection] {.async.} =
+): Future[DbConnection] {.async.} =
   var url = getEnv(urlEnv).strip()
   if url.len == 0 and urlEnv == "TURSO_DATABASE_URL":
     url = getEnv("TURSO_URL").strip()
@@ -589,7 +590,7 @@ proc withLibSQL*[T](
   closeAfterExecute = true,
   useCurlFallback = true,
   preferCurlTransport = false,
-  body: proc(db: LibSQLConnection): Future[T] {.closure.}
+  body: proc(db: DbConnection): Future[T] {.closure.}
 ): Future[T] {.async.} =
   let db = await openLibSQL(
     url = url,
@@ -609,7 +610,7 @@ proc withLibSQL*[T](
     await db.close()
 
 proc withLibSQLEnv*[T](
-  body: proc(db: LibSQLConnection): Future[T] {.closure.},
+  body: proc(db: DbConnection): Future[T] {.closure.},
   urlEnv = "TURSO_DATABASE_URL",
   authTokenEnv = "TURSO_AUTH_TOKEN",
   syncUrlEnv = "TURSO_SYNC_URL",

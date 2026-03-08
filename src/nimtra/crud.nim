@@ -1,7 +1,7 @@
 import std/[asyncdispatch, options, sequtils, strutils]
 
 import ./[mapper, model, values]
-import ./driver/libsql_http
+import ./driver/base
 
 proc defaultCrudTable[T](): string =
   modelTableName(T)
@@ -48,13 +48,13 @@ proc collectInsertData[T](entity: T, idField: string): tuple[cols: seq[string], 
         result.params.add(toSqlValue(fieldValue))
 
 proc insert* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   entity: T,
   tableName = "",
   idField = "id"
 ): Future[SqlResult] {.async.} =
   if db.isNil:
-    raise newException(LibSQLError, "Database handle is nil")
+    raise newException(NimtraDbError, "Database handle is nil")
 
   let targetTable = if tableName.len > 0: tableName else: defaultCrudTable[T]()
   let insertData = collectInsertData(entity, idField)
@@ -72,7 +72,7 @@ proc insert* [T](
   await db.execute(sql, params)
 
 proc upsertInternal[T](
-  db: LibSQLConnection,
+  db: DbConnection,
   entity: T,
   conflictFields: seq[string],
   updateFields: seq[string],
@@ -80,7 +80,7 @@ proc upsertInternal[T](
   idField = "id"
 ): Future[SqlResult] {.async.} =
   if db.isNil:
-    raise newException(LibSQLError, "Database handle is nil")
+    raise newException(NimtraDbError, "Database handle is nil")
 
   var normalizedConflict: seq[string]
   for field in conflictFields:
@@ -148,7 +148,7 @@ proc upsertInternal[T](
   await db.execute(sql, params)
 
 proc upsertReturningIdInternal[T](
-  db: LibSQLConnection,
+  db: DbConnection,
   entity: T,
   conflictFields: seq[string],
   updateFields: seq[string],
@@ -159,7 +159,7 @@ proc upsertReturningIdInternal[T](
   res.lastInsertRowId
 
 proc upsert* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   entity: T,
   conflictFields: openArray[string],
   updateFields: openArray[string] = [],
@@ -175,7 +175,7 @@ proc upsert* [T](
   upsertInternal(db, entity, conflictCopy, updateCopy, tableName, idField)
 
 proc upsert* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   entity: T,
   conflictField: string,
   updateFields: openArray[string] = [],
@@ -188,7 +188,7 @@ proc upsert* [T](
   upsertInternal(db, entity, @[conflictField], updateCopy, tableName, idField)
 
 proc upsertReturningId* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   entity: T,
   conflictFields: openArray[string],
   updateFields: openArray[string] = [],
@@ -204,7 +204,7 @@ proc upsertReturningId* [T](
   upsertReturningIdInternal(db, entity, conflictCopy, updateCopy, tableName, idField)
 
 proc insertReturningId* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   entity: T,
   tableName = "",
   idField = "id"
@@ -213,13 +213,13 @@ proc insertReturningId* [T](
   res.lastInsertRowId
 
 proc updateById* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   entity: T,
   tableName = "",
   idField = "id"
 ): Future[SqlResult] {.async.} =
   if db.isNil:
-    raise newException(LibSQLError, "Database handle is nil")
+    raise newException(NimtraDbError, "Database handle is nil")
 
   let targetTable = if tableName.len > 0: tableName else: defaultCrudTable[T]()
 
@@ -252,14 +252,14 @@ proc updateById* [T](
   await db.execute(sql, params)
 
 proc deleteById* [T, I](
-  db: LibSQLConnection,
+  db: DbConnection,
   _: typedesc[T],
   id: I,
   tableName = "",
   idField = "id"
 ): Future[SqlResult] {.async.} =
   if db.isNil:
-    raise newException(LibSQLError, "Database handle is nil")
+    raise newException(NimtraDbError, "Database handle is nil")
 
   let targetTable = if tableName.len > 0: tableName else: defaultCrudTable[T]()
   let sql = "DELETE FROM " & db.dialect.quoteIdent(targetTable) &
@@ -268,14 +268,14 @@ proc deleteById* [T, I](
   await db.execute(sql, @[toSqlValue(id)])
 
 proc findById* [T, I](
-  db: LibSQLConnection,
+  db: DbConnection,
   _: typedesc[T],
   id: I,
   tableName = "",
   idField = "id"
 ): Future[Option[SqlRow]] {.async.} =
   if db.isNil:
-    raise newException(LibSQLError, "Database handle is nil")
+    raise newException(NimtraDbError, "Database handle is nil")
 
   let targetTable = if tableName.len > 0: tableName else: defaultCrudTable[T]()
   let sql = "SELECT * FROM " & db.dialect.quoteIdent(targetTable) &
@@ -286,7 +286,7 @@ proc findById* [T, I](
   some(res.rows[0])
 
 proc findByIdModel* [T, I](
-  db: LibSQLConnection,
+  db: DbConnection,
   modelType: typedesc[T],
   id: I,
   tableName = "",
@@ -296,12 +296,12 @@ proc findByIdModel* [T, I](
   rowOptionToModel[T](row)
 
 proc findAll* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   _: typedesc[T],
   tableName = ""
 ): Future[seq[SqlRow]] {.async.} =
   if db.isNil:
-    raise newException(LibSQLError, "Database handle is nil")
+    raise newException(NimtraDbError, "Database handle is nil")
 
   let targetTable = if tableName.len > 0: tableName else: defaultCrudTable[T]()
   let sql = "SELECT * FROM " & db.dialect.quoteIdent(targetTable)
@@ -309,7 +309,7 @@ proc findAll* [T](
   res.rows
 
 proc findAllModels* [T](
-  db: LibSQLConnection,
+  db: DbConnection,
   modelType: typedesc[T],
   tableName = ""
 ): Future[seq[T]] {.async.} =
@@ -317,7 +317,7 @@ proc findAllModels* [T](
   rowsToModels[T](rows)
 
 proc existsById* [T, I](
-  db: LibSQLConnection,
+  db: DbConnection,
   modelType: typedesc[T],
   id: I,
   tableName = "",

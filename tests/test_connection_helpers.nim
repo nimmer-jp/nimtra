@@ -1,6 +1,7 @@
 import std/[asyncdispatch, os, unittest]
 
 import ../src/nimtra/driver/libsql_http
+import ../src/nimtra/driver/base
 
 suite "connection helpers":
   test "openLibSQLEnv validates missing url env":
@@ -26,13 +27,14 @@ suite "connection helpers":
       preferCurlTransport = true
     )
 
-    check db.config.url == "https://example.com"
-    check db.config.authToken == "token"
-    check db.config.syncUrl == "https://sync.example.com"
-    check db.config.maxRetries == 5
-    check db.config.retryBackoffMs == 123
-    check db.config.useCurlFallback == false
-    check db.config.preferCurlTransport
+    let conn = LibSQLConnection(db)
+    check conn.config.url == "https://example.com"
+    check conn.config.authToken == "token"
+    check conn.config.syncUrl == "https://sync.example.com"
+    check conn.config.maxRetries == 5
+    check conn.config.retryBackoffMs == 123
+    check conn.config.useCurlFallback == false
+    check conn.config.preferCurlTransport
     waitFor db.close()
 
     delEnv("NIMTRA_TEST_URL_ENV")
@@ -44,10 +46,11 @@ suite "connection helpers":
       url = "https://example.com",
       useCurlFallback = false,
       preferCurlTransport = true,
-      body = proc(db: LibSQLConnection): Future[string] {.closure, async.} =
-        check db.config.useCurlFallback == false
-        check db.config.preferCurlTransport
-        return db.config.url
+      body = proc(db: DbConnection): Future[string] {.closure, async.} =
+        let conn = LibSQLConnection(db)
+        check conn.config.useCurlFallback == false
+        check conn.config.preferCurlTransport
+        return conn.config.url
     )
     check value == "https://example.com"
 
@@ -58,8 +61,9 @@ suite "connection helpers":
     delEnv("TURSO_AUTH_TOKEN")
 
     let db = waitFor openLibSQLEnv()
-    check db.config.url == "https://fallback.example.com"
-    check db.config.authToken == "fallback-token"
+    let conn = LibSQLConnection(db)
+    check conn.config.url == "https://fallback.example.com"
+    check conn.config.authToken == "fallback-token"
     waitFor db.close()
 
     delEnv("TURSO_URL")

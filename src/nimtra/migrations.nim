@@ -1,7 +1,7 @@
 import std/[algorithm, asyncdispatch, json, options, sequtils, sets, strutils, tables, typetraits]
 
 import ./[dialects, model, schema, values]
-import ./driver/libsql_http
+import ./driver/base
 
 type
   Migration* = object
@@ -138,7 +138,7 @@ proc rowInt(row: SqlRow, keys: openArray[string]): int64 =
   value.get().asInt64()
 
 proc ensureMigrationsTable*(
-  db: LibSQLConnection,
+  db: DbConnection,
   tableName = DefaultMigrationsTable
 ): Future[void] {.async.} =
   let table = db.dialect.quoteIdent(tableName)
@@ -173,7 +173,7 @@ proc ensureMigrationsTable*(
       discard await db.execute(alterSql)
 
 proc listAppliedMigrations*(
-  db: LibSQLConnection,
+  db: DbConnection,
   tableName = DefaultMigrationsTable
 ): Future[seq[AppliedMigration]] {.async.} =
   await db.ensureMigrationsTable(tableName)
@@ -200,7 +200,7 @@ proc listAppliedMigrations*(
     result.add(applied)
 
 proc appliedMigrationVersions*(
-  db: LibSQLConnection,
+  db: DbConnection,
   tableName = DefaultMigrationsTable
 ): Future[HashSet[int64]] {.async.} =
   let applied = await db.listAppliedMigrations(tableName)
@@ -208,11 +208,11 @@ proc appliedMigrationVersions*(
     result.incl(migration.version)
 
 proc tableSnapshot*(
-  db: LibSQLConnection,
+  db: DbConnection,
   tableName: string
 ): Future[Option[TableSnapshot]] {.async.} =
   if db.dialect.name() != "sqlite":
-    raise newException(LibSQLError, "tableSnapshot() currently supports sqlite/libSQL dialect only")
+    raise newException(NimtraDbError, "tableSnapshot() currently supports sqlite/libSQL dialect only")
 
   let existsSql =
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1"
@@ -428,7 +428,7 @@ proc planSchemaDiff*[
 proc planModelDiff*[
   T
 ](
-  db: LibSQLConnection,
+  db: DbConnection,
   modelType: typedesc[T],
   indexPrefix = DefaultIndexPrefix,
   autoRebuild = false
@@ -459,7 +459,7 @@ proc migrationFromModel*[
 proc migrationFromModelDiff*[
   T
 ](
-  db: LibSQLConnection,
+  db: DbConnection,
   modelType: typedesc[T],
   version: SomeInteger,
   migrationName = "",
@@ -477,7 +477,7 @@ proc migrationFromModelDiff*[
 proc migrateModelDiff*[
   T
 ](
-  db: LibSQLConnection,
+  db: DbConnection,
   modelType: typedesc[T],
   version: SomeInteger,
   migrationName = "",
@@ -495,7 +495,7 @@ proc migrateModelDiff*[
   await db.applyMigration(migration, tableName)
 
 proc applyMigration*(
-  db: LibSQLConnection,
+  db: DbConnection,
   migration: Migration,
   tableName = DefaultMigrationsTable
 ): Future[void] {.async.} =
@@ -538,7 +538,7 @@ proc applyMigration*(
     raise
 
 proc verifyMigrationHistoryInternal(
-  db: LibSQLConnection,
+  db: DbConnection,
   migrations: seq[Migration],
   tableName = DefaultMigrationsTable,
   allowUnknownApplied = true
@@ -569,7 +569,7 @@ proc verifyMigrationHistoryInternal(
       )
 
 proc verifyMigrationHistory*(
-  db: LibSQLConnection,
+  db: DbConnection,
   migrations: openArray[Migration],
   tableName = DefaultMigrationsTable,
   allowUnknownApplied = true
@@ -578,7 +578,7 @@ proc verifyMigrationHistory*(
   verifyMigrationHistoryInternal(db, copied, tableName, allowUnknownApplied)
 
 proc pendingMigrationsInternal(
-  db: LibSQLConnection,
+  db: DbConnection,
   migrations: seq[Migration],
   tableName = DefaultMigrationsTable
 ): Future[seq[Migration]] {.async.} =
@@ -605,7 +605,7 @@ proc pendingMigrationsInternal(
     result.add(migration)
 
 proc pendingMigrations*(
-  db: LibSQLConnection,
+  db: DbConnection,
   migrations: openArray[Migration],
   tableName = DefaultMigrationsTable
 ): Future[seq[Migration]] =
@@ -613,7 +613,7 @@ proc pendingMigrations*(
   pendingMigrationsInternal(db, copied, tableName)
 
 proc migrateInternal(
-  db: LibSQLConnection,
+  db: DbConnection,
   migrations: seq[Migration],
   tableName = DefaultMigrationsTable
 ): Future[void] {.async.} =
@@ -622,7 +622,7 @@ proc migrateInternal(
     await db.applyMigration(migration, tableName)
 
 proc migrate*(
-  db: LibSQLConnection,
+  db: DbConnection,
   migrations: openArray[Migration],
   tableName = DefaultMigrationsTable
 ): Future[void] =
@@ -630,7 +630,7 @@ proc migrate*(
   migrateInternal(db, copied, tableName)
 
 proc migrateToInternal(
-  db: LibSQLConnection,
+  db: DbConnection,
   migrations: seq[Migration],
   targetVersion: SomeInteger,
   tableName = DefaultMigrationsTable
@@ -649,7 +649,7 @@ proc migrateToInternal(
     await db.applyMigration(migration, tableName)
 
 proc migrateTo*(
-  db: LibSQLConnection,
+  db: DbConnection,
   migrations: openArray[Migration],
   targetVersion: SomeInteger,
   tableName = DefaultMigrationsTable
@@ -660,7 +660,7 @@ proc migrateTo*(
 proc ensureModelSchema*[
   T
 ](
-  db: LibSQLConnection,
+  db: DbConnection,
   modelType: typedesc[T],
   ifNotExists = true,
   indexPrefix = DefaultIndexPrefix
@@ -671,7 +671,7 @@ proc ensureModelSchema*[
 proc ensureModelSchemaDiff*[
   T
 ](
-  db: LibSQLConnection,
+  db: DbConnection,
   modelType: typedesc[T],
   indexPrefix = DefaultIndexPrefix,
   autoRebuild = false
