@@ -5,7 +5,7 @@ license       = "MIT"
 srcDir        = "src"
 bin           = @["nimtra", "nimtra_cli"]
 installExt    = @["nim"]
-skipDirs      = @["tests", ".git", ".github", ".nimble", ".nimcache"]
+skipDirs      = @["tests", ".git", ".github", ".nimble", ".nimcache", "website"]
 
 requires "nim >= 2.0.0"
 requires "db_connector"
