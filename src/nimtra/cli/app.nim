@@ -1,11 +1,18 @@
-import std/[asyncdispatch, options, os, strformat, strutils, tables]
+import std/[asyncdispatch, options, os, osproc, strformat, strutils, tables, json, times, sequtils]
 
 import ../migrations
+import ../driver/base
 import ../driver/libsql_http
+import ../driver/postgres
+import ../driver/mysql
+import ../values
+import ../model
 import ./migration_files
+import ./runner
 
 type
   CliError = object of CatchableError
+
 
   CliConfig = object
     migrationsDir: string
@@ -91,6 +98,9 @@ Usage:
   {programName} migrate to <version> [options]
   {programName} migrate verify [options]
   {programName} migrate list [options]
+  {programName} generate <schema-file> [options]
+  {programName} push <schema-file> [options]
+
 
 Options:
   --dir, -d <path>         Migration SQL directory (default: db/migrations)
@@ -156,16 +166,104 @@ proc parseMigrateArgs(args: seq[string]): tuple[subcommand: string, cfg: CliConf
     result.positionals.add(arg)
     inc i
 
-proc openDb(cfg: CliConfig): Future[LibSQLConnection] {.async.} =
-  if cfg.url.len > 0:
-    await openLibSQL(
-      url = cfg.url,
-      authToken = cfg.token,
+proc detectDbUrl(cfg: CliConfig): string =
+  if cfg.url.len > 0: return cfg.url
+  for env in ["DATABASE_URL", "TURSO_DATABASE_URL", "TURSO_URL", "PG_DATABASE_URL", "MYSQL_DATABASE_URL"]:
+    let val = getEnv(env).strip()
+    if val.len > 0: return val
+  ""
+
+proc openDb(cfg: CliConfig): Future[DbConnection] {.async.} =
+  let url = detectDbUrl(cfg)
+  if url.len == 0:
+    raise newException(CliError, "No database URL provided via --url or environment variables (DATABASE_URL, etc.)")
+
+  if url.startsWith("postgres://") or url.startsWith("postgresql://"):
+    return await openPostgres(url)
+  elif url.startsWith("mysql://"):
+    let cleanUrl = url.replace("mysql://", "")
+    var host = "127.0.0.1"
+    var port = 3306
+    var user = "root"
+    var pass = ""
+    var dbname = ""
+    
+    let parts = cleanUrl.split('@')
+    if parts.len == 2:
+      let credentials = parts[0].split(':')
+      user = credentials[0]
+      if credentials.len > 1: pass = credentials[1]
+      
+      let hostDb = parts[1].split('/')
+      if hostDb.len == 2:
+        dbname = hostDb[1]
+      
+      let hostPort = hostDb[0].split(':')
+      host = hostPort[0]
+      if hostPort.len > 1:
+        try:
+          port = parseInt(hostPort[1])
+        except ValueError:
+          discard
+    else:
+      raise newException(CliError, "Invalid MySQL URL format: " & url)
+    return await openMySQL(host, user, pass, dbname, port)
+  else:
+    # Default to libSQL
+    var token = cfg.token
+    if token.len == 0:
+      token = getEnv("TURSO_AUTH_TOKEN").strip()
+      if token.len == 0: token = getEnv("TURSO_TOKEN").strip()
+    
+    return await openLibSQL(
+      url = url,
+      authToken = token,
       preferCurlTransport = cfg.preferCurl
     )
-  else:
-    await openLibSQLEnv(preferCurlTransport = cfg.preferCurl)
 
+proc extractModelMeta(schemaFile: string): seq[ModelMeta] =
+  if not fileExists(schemaFile):
+    raise newException(CliError, "Schema file not found: " & schemaFile)
+
+  let absPath = absolutePath(schemaFile)
+  let tmpDir = getTempDir()
+  let runnerFile = tmpDir / "nimtra_runner.nim"
+  let moduleName = absPath.splitFile.name
+  
+  # Copy the user's schema to the temp directory alongside the runner so it can be imported cleanly
+  # Or better, just import it by absolute path
+  let code = runnerTemplate.replace("$1", "\"" & absPath.replace("\\", "/") & "\"")
+  writeFile(runnerFile, code)
+
+  echo "Compiling schema definition... (" & schemaFile & ")"
+  let (output, exitCode) = execCmdEx("nim c -r --hints:off --warnings:off " & runnerFile)
+  if exitCode != 0:
+    removeFile(runnerFile)
+    raise newException(CliError, "Failed to compile schema file:\n" & output)
+
+  removeFile(runnerFile)
+
+  # Try to find JSON output
+  try:
+    let jNode = parseJson(output.strip().splitLines()[^1])
+    for jm in jNode.elems:
+      var meta: ModelMeta
+      meta.table = jm["table"].getStr()
+      for jf in jm["fields"].elems:
+        var field: FieldMeta
+        field.name = jf["name"].getStr()
+        field.nimType = jf["nimType"].getStr()
+        field.dbType = jf["dbType"].getStr()
+        field.primary = jf["primary"].getBool()
+        field.autoincrement = jf["autoincrement"].getBool()
+        field.unique = jf["unique"].getBool()
+        field.indexed = jf["indexed"].getBool()
+        if jf.hasKey("maxLength"): field.maxLength = some(jf["maxLength"].getInt())
+        if jf.hasKey("defaultValue"): field.defaultValue = some(jf["defaultValue"].getStr())
+        meta.fields.add(field)
+      result.add(meta)
+  except CatchableError as e:
+    raise newException(CliError, "Failed to parse schema output: " & e.msg & "\nOutput was: " & output)
 proc printApplied(applied: seq[AppliedMigration]) =
   if applied.len == 0:
     echo "No applied migrations."
@@ -326,6 +424,65 @@ proc runCli*(
       raise newException(CliError, "Missing migrate subcommand")
     let (subcommand, cfg, positionals) = parseMigrateArgs(args[1 .. ^1])
     await runMigrate(subcommand, cfg, positionals)
+  of "generate":
+    let (_, cfg, positionals) = parseMigrateArgs(args)
+    if positionals.len < 1:
+      raise newException(CliError, "generate requires <schema-file>")
+    let schemaFile = positionals[0]
+    let metas = extractModelMeta(schemaFile)
+    let db = await openDb(cfg)
+    try:
+      let migration = await migrationFromModels(metas, db, cfg.version.get(defaultVersionFromClock()), "schema_update")
+      if migration.statements.len == 0:
+        echo "No schema changes detected."
+        return
+      
+      createDir(cfg.migrationsDir)
+      let fileName = $migration.version & "_schema_update.sql"
+      let target = cfg.migrationsDir / fileName
+      var content = "-- nimtra migration\n-- name: schema_update\n-- created_at: " & now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'") & "\n--\n\n"
+      for stmt in migration.statements:
+        content.add(stmt.sql & ";\n")
+      writeFile(target, content)
+      echo "Generated migration file: " & target
+      if migration.warnings.len > 0:
+        echo "Warnings:"
+        for w in migration.warnings: echo "  - " & w
+    finally:
+      await db.close()
+
+  of "push":
+    let (_, cfg, positionals) = parseMigrateArgs(args)
+    if positionals.len < 1:
+      raise newException(CliError, "push requires <schema-file>")
+    let schemaFile = positionals[0]
+    let metas = extractModelMeta(schemaFile)
+    let db = await openDb(cfg)
+    try:
+      let plan = await planFullSchemaDiff(metas, db, autoRebuild = true)
+      if plan.statements.len == 0:
+        echo "Database schema is already up to date."
+        return
+      
+      echo "The following statements will be executed:"
+      for stmt in plan.statements:
+        echo "  " & stmt & ";"
+      
+      if plan.warnings.len > 0:
+        echo "\nWARNINGS:"
+        for w in plan.warnings: echo "  ! " & w
+        echo ""
+      
+      stdout.write("Apply these changes to the database? [y/N]: ")
+      let answer = stdin.readLine().strip().toLowerAscii()
+      if answer == "y" or answer == "yes":
+        let stmts = plan.statements.mapIt(SqlStatement(sql: it))
+        discard await db.executeBatch(stmts)
+        echo "Changes applied successfully."
+      else:
+        echo "Aborted."
+    finally:
+      await db.close()
   else:
     raise newException(CliError, "Unknown command: " & command)
 

@@ -53,16 +53,50 @@ nimble install nimtra
 - ライブラリ本体: `import nimtra`
 - CLI バイナリ: `nimtra`, `nimtra_cli`
 
-環境変数で接続する場合は以下がデフォルトです。
+## Database Drivers
 
-```bash
-export TURSO_DATABASE_URL="libsql://your-db.turso.io"
-export TURSO_AUTH_TOKEN="YOUR_TOKEN"
+`nimtra` は libSQL, PostgreSQL, MySQL をサポートしています。どのドライバを使っても、その後のクエリ記述やモデル操作は共通です。
+
+### libSQL (Turso)
+
+```nim
+import nimtra
+
+# HTTP 接続
+let db = await openLibSQL(url = "libsql://...", authToken = "...")
+
+# 環境変数 (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN) から接続
+let db = await openLibSQLEnv()
 ```
 
-`TURSO_URL` / `TURSO_TOKEN` も fallback alias として扱えます。
+### PostgreSQL
+
+```nim
+import nimtra
+
+# 接続文字列で接続
+let db = await openPostgres("postgres://user:pass@localhost:5432/dbname")
+
+# 環境変数 (PG_DATABASE_URL) から接続
+let db = await openPostgresEnv()
+```
+
+### MySQL
+
+```nim
+import nimtra
+
+# パラメータを指定して接続
+let db = await openMySQL(host = "127.0.0.1", user = "root", pass = "", dbname = "test")
+
+# 環境変数 (MYSQL_DATABASE_URL) から接続
+# (mysql://user:pass@host:port/dbname 形式をパースします)
+let db = await openMySQLEnv()
+```
 
 ## Quick Start
+
+一度 `db` をオープンすれば、データベースの種類に関係なく共通の API を利用できます。
 
 ```nim
 import std/asyncdispatch
@@ -136,19 +170,16 @@ await db.migrateTo([m1, m2, m3], targetVersion = 2)
 ## CLI Workflow
 
 SQL ファイルをディレクトリで管理する drizzle-like な運用にも対応しています。
-
-利用できる subcommand は `new`, `status`, `up`, `to`, `verify`, `list` です。
-
-```text
-db/
-  migrations/
-    20260307120000_create_users.sql
-    20260307121000_add_user_index.sql
-```
+接続先は `--url` オプションまたは環境変数（`DATABASE_URL`, `TURSO_DATABASE_URL`, `PG_DATABASE_URL`, `MYSQL_DATABASE_URL`）から自動判別されます。
 
 ```bash
 # 0) インストール
 nimble install nimtra
+
+# 接続先の設定例
+export DATABASE_URL="libsql://your-db.turso.io"         # libSQL
+# export DATABASE_URL="postgres://user:pass@host/db"   # PostgreSQL
+# export DATABASE_URL="mysql://user:pass@host/db"      # MySQL
 
 # 1) マイグレーション雛形を作成
 nimtra migrate new "create users"

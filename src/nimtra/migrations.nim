@@ -758,6 +758,30 @@ proc migrationFromModel*[
       "create_" & name(T).toLowerAscii()
   result = newMigration(version, resolvedMigrationName, statements)
 
+proc planFullSchemaDiff*(
+  metas: seq[ModelMeta],
+  db: DbConnection,
+  indexPrefix = DefaultIndexPrefix,
+  autoRebuild = false
+): Future[SchemaDiffPlan] {.async.} =
+  for meta in metas:
+    let snapshot = await db.tableSnapshot(meta.table)
+    let diff = planSchemaDiff(meta, snapshot, db.dialect, indexPrefix, autoRebuild)
+    result.statements.add(diff.statements)
+    for w in diff.warnings:
+      result.warnings.add("[" & meta.table & "] " & w)
+
+proc migrationFromModels*(
+  metas: seq[ModelMeta],
+  db: DbConnection,
+  version: int64,
+  name: string,
+  indexPrefix = DefaultIndexPrefix,
+  autoRebuild = false
+): Future[Migration] {.async.} =
+  let plan = await planFullSchemaDiff(metas, db, indexPrefix, autoRebuild)
+  return newMigration(version, name, plan.statements, plan.warnings)
+
 proc migrationFromModelDiff*[
   T
 ](
@@ -768,13 +792,14 @@ proc migrationFromModelDiff*[
   indexPrefix = DefaultIndexPrefix,
   autoRebuild = false
 ): Future[Migration] {.async.} =
-  let plan = await db.planModelDiff(modelType, indexPrefix, autoRebuild)
+  let plan = await db.planSchemaDiff(modelType, indexPrefix, autoRebuild)
   let resolvedMigrationName =
     if migrationName.len > 0:
       migrationName
     else:
-      "sync_" & name(T).toLowerAscii()
-  result = newMigration(version, resolvedMigrationName, plan.statements, plan.warnings)
+      "diff_" & name(T).toLowerAscii()
+  return newMigration(int64(version), resolvedMigrationName, plan.statements, plan.warnings)
+
 
 proc migrateModelDiff*[
   T
