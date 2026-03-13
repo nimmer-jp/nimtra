@@ -162,7 +162,7 @@ proc upsert* [T](
   db: DbConnection,
   entity: T,
   conflictFields: openArray[string],
-  updateFields: openArray[string] = [],
+  updateFields: openArray[string],
   tableName = "",
   idField = "id"
 ): Future[SqlResult] =
@@ -177,8 +177,20 @@ proc upsert* [T](
 proc upsert* [T](
   db: DbConnection,
   entity: T,
+  conflictFields: openArray[string],
+  tableName = "",
+  idField = "id"
+): Future[SqlResult] =
+  var conflictCopy = newSeqOfCap[string](conflictFields.len)
+  for field in conflictFields:
+    conflictCopy.add(field)
+  upsertInternal(db, entity, conflictCopy, @[], tableName, idField)
+
+proc upsert* [T](
+  db: DbConnection,
+  entity: T,
   conflictField: string,
-  updateFields: openArray[string] = [],
+  updateFields: openArray[string],
   tableName = "",
   idField = "id"
 ): Future[SqlResult] =
@@ -187,11 +199,20 @@ proc upsert* [T](
     updateCopy.add(field)
   upsertInternal(db, entity, @[conflictField], updateCopy, tableName, idField)
 
+proc upsert* [T](
+  db: DbConnection,
+  entity: T,
+  conflictField: string,
+  tableName = "",
+  idField = "id"
+): Future[SqlResult] =
+  upsertInternal(db, entity, @[conflictField], @[], tableName, idField)
+
 proc upsertReturningId* [T](
   db: DbConnection,
   entity: T,
   conflictFields: openArray[string],
-  updateFields: openArray[string] = [],
+  updateFields: openArray[string],
   tableName = "",
   idField = "id"
 ): Future[Option[int64]] =
@@ -202,6 +223,18 @@ proc upsertReturningId* [T](
   for field in updateFields:
     updateCopy.add(field)
   upsertReturningIdInternal(db, entity, conflictCopy, updateCopy, tableName, idField)
+
+proc upsertReturningId* [T](
+  db: DbConnection,
+  entity: T,
+  conflictFields: openArray[string],
+  tableName = "",
+  idField = "id"
+): Future[Option[int64]] =
+  var conflictCopy = newSeqOfCap[string](conflictFields.len)
+  for field in conflictFields:
+    conflictCopy.add(field)
+  upsertReturningIdInternal(db, entity, conflictCopy, @[], tableName, idField)
 
 proc insertReturningId* [T](
   db: DbConnection,

@@ -245,6 +245,11 @@ proc extractFieldName(node: NimNode): string {.compileTime.} =
       ""
   of nnkPragmaExpr:
     extractFieldName(node[0])
+  of nnkAccQuoted:
+    if node.len > 0:
+      extractFieldName(node[0])
+    else:
+      ""
   else:
     ""
 
@@ -253,12 +258,17 @@ proc resolveTypeDefNode(typeNode: NimNode): NimNode {.compileTime.} =
   if directImpl.kind == nnkTypeDef:
     return directImpl
 
-  let typeInst = typeNode.getTypeInst
-  if typeInst.kind == nnkBracketExpr and typeInst.len >= 2:
-    let candidate = typeInst[^1]
-    let candidateImpl = candidate.getImpl
-    if candidateImpl.kind == nnkTypeDef:
-      return candidateImpl
+  var current = typeNode.getTypeInst
+  if current.kind == nnkBracketExpr and current.len >= 2:
+    current = current[^1]
+
+  let instImpl = current.getImpl
+  if instImpl.kind == nnkTypeDef:
+    return instImpl
+
+  let tImpl = current.getTypeImpl
+  if tImpl.kind == nnkRefTy or tImpl.kind == nnkObjectTy:
+    return newTree(nnkTypeDef, newEmptyNode(), newEmptyNode(), tImpl)
 
   error("Could not resolve model type for where()", typeNode)
 
@@ -282,12 +292,32 @@ proc objectFields(typeImpl: NimNode): seq[string] {.compileTime.} =
 proc modelFieldNames(modelType: NimNode): seq[string] {.compileTime.} =
   objectFields(resolveTypeDefNode(modelType))
 
+proc unwrapModelField(node: NimNode): tuple[isField: bool, fieldName: string, isLower: bool] {.compileTime.} =
+  if node.kind == nnkDotExpr and node.len == 2 and
+     node[0].kind in {nnkIdent, nnkSym} and $node[0] == "it" and
+     node[1].kind in {nnkIdent, nnkSym}:
+    return (true, $node[1], false)
+  
+  if node.kind == nnkCall and node.len == 1 and node[0].kind == nnkDotExpr and node[0].len == 2:
+    let innerDot = node[0]
+    if innerDot[1].kind in {nnkIdent, nnkSym} and $innerDot[1] in ["lower", "toLowerAscii"]:
+      let fieldDot = innerDot[0]
+      if fieldDot.kind == nnkDotExpr and fieldDot.len == 2 and
+         fieldDot[0].kind in {nnkIdent, nnkSym} and $fieldDot[0] == "it" and
+         fieldDot[1].kind in {nnkIdent, nnkSym}:
+        return (true, $fieldDot[1], true)
+        
+  if node.kind == nnkCall and node.len == 2 and node[0].kind in {nnkIdent, nnkSym} and $node[0] in ["lower", "toLowerAscii"]:
+    let fieldDot = node[1]
+    if fieldDot.kind == nnkDotExpr and fieldDot.len == 2 and
+       fieldDot[0].kind in {nnkIdent, nnkSym} and $fieldDot[0] == "it" and
+       fieldDot[1].kind in {nnkIdent, nnkSym}:
+      return (true, $fieldDot[1], true)
+
+  return (false, "", false)
+
 proc isModelField(node: NimNode): bool {.compileTime.} =
-  node.kind == nnkDotExpr and
-    node.len == 2 and
-    node[0].kind in {nnkIdent, nnkSym} and
-    $node[0] == "it" and
-    node[1].kind in {nnkIdent, nnkSym}
+  unwrapModelField(node).isField
 
 proc escapeField(field: string): string {.compileTime.} =
   "\"" & field.replace("\"", "\"\"") & "\""
@@ -314,27 +344,46 @@ proc compileComparison(node: NimNode, fields: seq[string]): CompiledPredicate {.
     sqlOp = "<>"
   of ">", ">=", "<", "<=":
     discard
+  of "like", "ilike":
+    sqlOp = "LIKE"
   else:
     error("Unsupported comparison operator: " & op, node)
 
-  if isModelField(lhs):
-    let field = $lhs[1]
+  let lhsInfo = unwrapModelField(lhs)
+  let rhsInfo = unwrapModelField(rhs)
+
+  if lhsInfo.isField:
+    let field = lhsInfo.fieldName
     ensureField(field)
+    var leftSql = escapeField(field)
+    if lhsInfo.isLower or op == "ilike": leftSql = "LOWER(" & leftSql & ")"
+    
     if rhs.kind == nnkNilLit and sqlOp in ["=", "<>"]:
-      result.sql = escapeField(field) & (if sqlOp == "=": " IS NULL" else: " IS NOT NULL")
+      result.sql = leftSql & (if sqlOp == "=": " IS NULL" else: " IS NOT NULL")
       return
-    result.sql = escapeField(field) & " " & sqlOp & " ?"
-    result.args = @[rhs]
+    
+    result.sql = leftSql & " " & sqlOp & " ?"
+    if lhsInfo.isLower or op == "ilike":
+      result.args = @[quote do: (`rhs`).toLowerAscii()]
+    else:
+      result.args = @[rhs]
     return
 
-  if isModelField(rhs):
-    let field = $rhs[1]
+  if rhsInfo.isField:
+    let field = rhsInfo.fieldName
     ensureField(field)
+    var rightSql = escapeField(field)
+    if rhsInfo.isLower or op == "ilike": rightSql = "LOWER(" & rightSql & ")"
+    
     if lhs.kind == nnkNilLit and sqlOp in ["=", "<>"]:
-      result.sql = escapeField(field) & (if sqlOp == "=": " IS NULL" else: " IS NOT NULL")
+      result.sql = rightSql & (if sqlOp == "=": " IS NULL" else: " IS NOT NULL")
       return
-    result.sql = "? " & sqlOp & " " & escapeField(field)
-    result.args = @[lhs]
+      
+    result.sql = "? " & sqlOp & " " & rightSql
+    if rhsInfo.isLower or op == "ilike":
+      result.args = @[quote do: (`lhs`).toLowerAscii()]
+    else:
+      result.args = @[lhs]
     return
 
   error("A comparison must include at least one model field like it.field", node)
@@ -345,46 +394,61 @@ proc compileLikeCall(node: NimNode, fields: seq[string]): CompiledPredicate {.co
       error("Unknown field '" & name & "' in where()", node)
 
   var methodName = ""
-  var fieldExpr: NimNode = nil
   var argExpr: NimNode = nil
+  var fieldInfo: tuple[isField: bool, fieldName: string, isLower: bool] = (false, "", false)
 
   if node.len == 2 and node[0].kind == nnkDotExpr:
     let callee = node[0]
-    if callee.len == 2 and isModelField(callee[0]):
-      methodName = $callee[1]
-      fieldExpr = callee[0]
-      argExpr = node[1]
-  elif node.len == 3 and node[0].kind in {nnkIdent, nnkSym} and isModelField(node[1]):
-    methodName = $node[0]
-    fieldExpr = node[1]
-    argExpr = node[2]
+    if callee.len == 2:
+      let checkField = unwrapModelField(callee[0])
+      if checkField.isField:
+        methodName = $callee[1]
+        fieldInfo = checkField
+        argExpr = node[1]
+  elif node.len == 3 and node[0].kind in {nnkIdent, nnkSym}:
+    let checkField = unwrapModelField(node[1])
+    if checkField.isField:
+      methodName = $node[0]
+      fieldInfo = checkField
+      argExpr = node[2]
 
-  if fieldExpr.isNil or argExpr.isNil:
+  if not fieldInfo.isField or argExpr.isNil:
     error("LIKE helpers must be called on a model field like it.title.contains(term)", node)
 
-  let fieldName = $fieldExpr[1]
+  let fieldName = fieldInfo.fieldName
   ensureField(fieldName)
 
-  result.sql = escapeField(fieldName) & " LIKE ?"
+  var leftSql = escapeField(fieldName)
+  if fieldInfo.isLower or methodName in ["icontains", "ilike"]:
+    leftSql = "LOWER(" & leftSql & ")"
+    
+  result.sql = leftSql & " LIKE ?"
 
   case methodName
   of "contains":
-    result.args = @[
-      quote do:
-        "%" & $`argExpr` & "%"
-    ]
+    if fieldInfo.isLower:
+      result.args = @[quote do: "%" & (`argExpr`).toLowerAscii() & "%"]
+    else:
+      result.args = @[quote do: "%" & $`argExpr` & "%"]
+  of "icontains":
+    result.args = @[quote do: "%" & (`argExpr`).toLowerAscii() & "%"]
   of "startsWith":
-    result.args = @[
-      quote do:
-        $`argExpr` & "%"
-    ]
+    if fieldInfo.isLower:
+      result.args = @[quote do: (`argExpr`).toLowerAscii() & "%"]
+    else:
+      result.args = @[quote do: $`argExpr` & "%"]
   of "endsWith":
-    result.args = @[
-      quote do:
-        "%" & $`argExpr`
-    ]
+    if fieldInfo.isLower:
+      result.args = @[quote do: "%" & (`argExpr`).toLowerAscii()]
+    else:
+      result.args = @[quote do: "%" & $`argExpr`]
   of "like":
-    result.args = @[argExpr]
+    if fieldInfo.isLower:
+      result.args = @[quote do: (`argExpr`).toLowerAscii()]
+    else:
+      result.args = @[argExpr]
+  of "ilike":
+    result.args = @[quote do: (`argExpr`).toLowerAscii()]
   else:
     error("Unsupported call in where(): " & methodName, node)
 
@@ -401,7 +465,7 @@ proc compilePredicate(node: NimNode, fields: seq[string]): CompiledPredicate {.c
       let left = compilePredicate(node[1], fields)
       let right = compilePredicate(node[2], fields)
       result = mergePred(left, right, op.toUpperAscii())
-    of "==", "!=", ">", ">=", "<", "<=":
+    of "==", "!=", ">", ">=", "<", "<=", "like", "ilike":
       result = compileComparison(node, fields)
     else:
       error("Unsupported infix operator in where(): " & op, node)

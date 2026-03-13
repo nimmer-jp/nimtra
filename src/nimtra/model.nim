@@ -59,6 +59,11 @@ proc extractFieldName(node: NimNode): string {.compileTime.} =
       ""
   of nnkPragmaExpr:
     extractFieldName(node[0])
+  of nnkAccQuoted:
+    if node.len > 0:
+      extractFieldName(node[0])
+    else:
+      ""
   else:
     ""
 
@@ -84,12 +89,19 @@ proc resolveTypeDefNode(typeNode: NimNode): NimNode {.compileTime.} =
   if directImpl.kind == nnkTypeDef:
     return directImpl
 
-  let typeInst = typeNode.getTypeInst
-  if typeInst.kind == nnkBracketExpr and typeInst.len >= 2:
-    let candidate = typeInst[^1]
-    let candidateImpl = candidate.getImpl
-    if candidateImpl.kind == nnkTypeDef:
-      return candidateImpl
+  var current = typeNode.getTypeInst
+  if current.kind == nnkBracketExpr and current.len >= 2:
+    current = current[^1]
+
+  let instImpl = current.getImpl
+  if instImpl.kind == nnkTypeDef:
+    return instImpl
+
+  # Fallback 1: resolve getTypeImpl which reliably unwraps symbols across module boundaries
+  let tImpl = current.getTypeImpl
+  if tImpl.kind == nnkRefTy or tImpl.kind == nnkObjectTy:
+    # Construct a synthetic TypeDef since our ast parsers expect TypeDef[2] -> RefTy/ObjectTy
+    return newTree(nnkTypeDef, newEmptyNode(), newEmptyNode(), tImpl)
 
   error("modelMeta() expects a model type", typeNode)
 
