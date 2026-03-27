@@ -1,4 +1,4 @@
-import std/[macros, options]
+import std/[macros, options, strutils]
 import ./utils
 
 template primary* {.pragma.}
@@ -26,8 +26,18 @@ type
     table*: string
     fields*: seq[FieldMeta]
 
+proc normalizedTypeName(typeName: string): string {.compileTime.} =
+  result = typeName.replace(" ", "").toLowerAscii()
+  while result.startsWith("option[") and result.endsWith("]") and result.len > 8:
+    result = result[7 ..< result.len - 1]
+
+  let lastDot = result.rfind('.')
+  if lastDot >= 0 and lastDot + 1 < result.len:
+    result = result[lastDot + 1 .. ^1]
+
 proc mapTypeToDbType(typeName: string): string {.compileTime.} =
-  case typeName
+  let normalized = normalizedTypeName(typeName)
+  case normalized
   of "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "bool":
     "INTEGER"
   of "float", "float32", "float64":
@@ -36,6 +46,8 @@ proc mapTypeToDbType(typeName: string): string {.compileTime.} =
     "TEXT"
   of "seq[byte]":
     "BLOB"
+  of "uuid":
+    "UUID"
   else:
     "TEXT"
 

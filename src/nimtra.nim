@@ -1,11 +1,11 @@
-import nimtra/[crud, dialects, mapper, migrations, model, query_builder, schema, utils, values]
+import nimtra/[crud, dialects, mapper, migrations, model, query_builder, schema, utils, uuid, values]
 import nimtra/driver/base
 import nimtra/driver/postgres
 import nimtra/driver/mysql
 import nimtra/driver/libsql_http
 import nimtra/driver/libsql_embedded
 
-export crud, dialects, mapper, migrations, model, query_builder, schema, utils, values
+export crud, dialects, mapper, migrations, model, query_builder, schema, utils, uuid, values
 export base
 export postgres
 export mysql

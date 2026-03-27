@@ -454,6 +454,28 @@ proc tableSnapshot*(
 proc normalizeType(value: string): string =
   value.strip().toUpperAscii()
 
+proc modelDbTypeForDiff(field: FieldMeta, dialect: Dialect): string =
+  result = field.dbType
+  case dialect.name()
+  of "sqlite":
+    if result == "UUID":
+      result = "TEXT"
+  of "postgres":
+    if field.primary and field.autoincrement and result == "INTEGER":
+      result = "SERIAL"
+    elif result == "DATETIME":
+      result = "TIMESTAMP WITH TIME ZONE"
+  of "mysql":
+    if field.primary and field.autoincrement and result == "INTEGER":
+      result = "INT AUTO_INCREMENT"
+    elif result == "UUID":
+      # information_schema.data_type reports CHAR without length
+      result = "CHAR"
+    elif field.maxLength.isSome and result == "TEXT":
+      result = "VARCHAR(" & $field.maxLength.get() & ")"
+  else:
+    discard
+
 proc normalizeDefault(value: string): string =
   value.strip().replace("\"", "'").toUpperAscii()
 
@@ -523,11 +545,7 @@ proc buildPostgresAlters(
 
     let existing = existingCols[key]
     let colName = dialect.quoteIdent(field.name)
-    var dbType = field.dbType
-    if field.primary and field.autoincrement and dbType == "INTEGER":
-      dbType = "SERIAL"
-    elif dbType == "DATETIME":
-      dbType = "TIMESTAMP WITH TIME ZONE"
+    let dbType = modelDbTypeForDiff(field, dialect)
 
     if normalizeType(existing.dbType) != normalizeType(dbType):
       result.add("ALTER TABLE " & tName & " ALTER COLUMN " & colName & " TYPE " & dbType & " USING " & colName & "::" & dbType)
@@ -568,11 +586,7 @@ proc buildMySQLAlters(
 
     let existing = existingCols[key]
     let colName = dialect.quoteIdent(field.name)
-    var dbType = field.dbType
-    if field.primary and field.autoincrement and dbType == "INTEGER":
-      dbType = "INT AUTO_INCREMENT"
-    if field.maxLength.isSome and field.dbType == "TEXT":
-      dbType = "VARCHAR(" & $field.maxLength.get() & ")"
+    let dbType = modelDbTypeForDiff(field, dialect)
 
     if normalizeType(existing.dbType) != normalizeType(dbType) or (field.primary and not existing.primaryKey):
       result.add("ALTER TABLE " & tName & " MODIFY COLUMN " & columnDefinitionSql(field, dialect, includePrimaryAndUnique = true))
@@ -658,10 +672,11 @@ proc planSchemaDiff*(
       continue
 
     let existing = existingCols[key]
-    if normalizeType(existing.dbType) != normalizeType(field.dbType):
+    let expectedType = modelDbTypeForDiff(field, d)
+    if normalizeType(existing.dbType) != normalizeType(expectedType):
       rebuildReasons.add(
         "Column type differs for '" & field.name & "': existing=" &
-        existing.dbType & ", model=" & field.dbType
+        existing.dbType & ", model=" & expectedType
       )
 
     if field.defaultValue.isSome and existing.defaultValue.isSome:

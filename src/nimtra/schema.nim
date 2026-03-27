@@ -55,9 +55,13 @@ method columnDefinitionSqlImpl*(dialect: Dialect, field: FieldMeta, includePrima
 
 method columnDefinitionSqlImpl*(dialect: SQLiteDialect, field: FieldMeta, includePrimaryAndUnique: bool): string =
   let colName = dialect.quoteIdent(field.name)
-  if includePrimaryAndUnique and field.primary and field.autoincrement and field.dbType == "INTEGER":
+  var dbType = field.dbType
+  if dbType == "UUID":
+    dbType = "TEXT"
+
+  if includePrimaryAndUnique and field.primary and field.autoincrement and dbType == "INTEGER":
     return colName & " INTEGER PRIMARY KEY AUTOINCREMENT"
-  result = colName & " " & field.dbType
+  result = colName & " " & dbType
   if includePrimaryAndUnique and field.primary:
     result.add(" PRIMARY KEY")
   if includePrimaryAndUnique and field.unique:
@@ -88,6 +92,8 @@ method columnDefinitionSqlImpl*(dialect: MySQLDialect, field: FieldMeta, include
   var dbType = field.dbType
   if includePrimaryAndUnique and field.primary and field.autoincrement and dbType == "INTEGER":
     dbType = "INT AUTO_INCREMENT"
+  elif dbType == "UUID":
+    dbType = "CHAR(36)"
 
   result = colName & " " & dbType
   if includePrimaryAndUnique and field.primary:

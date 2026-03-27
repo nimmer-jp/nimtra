@@ -1,4 +1,5 @@
 import std/[json, options, strutils, tables, times]
+import ./uuid
 
 type
   SqlValueKind* = enum
@@ -54,6 +55,9 @@ proc toSqlValue*(value: bool): SqlValue =
 
 proc toSqlValue*(value: string): SqlValue =
   SqlValue(kind: svText, textValue: value)
+
+proc toSqlValue*(value: UUID): SqlValue =
+  SqlValue(kind: svText, textValue: $value)
 
 proc toSqlValue*(value: cstring): SqlValue =
   SqlValue(kind: svText, textValue: $value)
@@ -176,6 +180,9 @@ proc fromSqlValue*(value: SqlValue, _: typedesc[bool]): bool =
 
 proc fromSqlValue*(value: SqlValue, _: typedesc[string]): string =
   value.asString()
+
+proc fromSqlValue*(value: SqlValue, _: typedesc[UUID]): UUID =
+  parseUuid(value.asString())
 
 proc fromSqlValue*(value: SqlValue, _: typedesc[cstring]): cstring =
   value.asString().cstring
