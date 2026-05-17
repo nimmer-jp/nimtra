@@ -1,4 +1,4 @@
-import std/[asyncdispatch, base64, httpclient, json, options, os, osproc, streams, strutils, tables, uri]
+import std/[asyncdispatch, base64, httpclient, json, options, os, strutils, tables, uri]
 
 import ../[dialects, values]
 import ./base
@@ -18,8 +18,6 @@ type
     maxRetries*: int
     retryBackoffMs*: int
     closeAfterExecute*: bool
-    useCurlFallback*: bool
-    preferCurlTransport*: bool
     syncHook*: SyncHook
     syncCloseHook*: SyncCloseHook
 
@@ -230,65 +228,6 @@ proc buildExecuteRequest(sql: string, args: openArray[SqlValue]): JsonNode =
   for arg in args:
     result["stmt"]["args"].add(encodeHranaValue(arg))
 
-type
-  CurlTransportResponse = object
-    statusCode: int
-    body: string
-
-proc parseCurlTransportOutput(output: string): CurlTransportResponse =
-  const marker = "\n__NIMTRA_HTTP_CODE__="
-  let markerPos = output.rfind(marker)
-  if markerPos < 0:
-    raise newException(
-      LibSQLError,
-      "curl transport returned unexpected output: missing status marker"
-    )
-
-  let body = output[0 ..< markerPos]
-  let codeText = output[markerPos + marker.len .. ^1].strip()
-  if codeText.len == 0:
-    raise newException(LibSQLError, "curl transport returned empty HTTP status")
-
-  let code =
-    try:
-      parseInt(codeText)
-    except ValueError:
-      raise newException(LibSQLError, "curl transport returned invalid HTTP status: " & codeText)
-
-  CurlTransportResponse(statusCode: code, body: body)
-
-proc pipelineViaCurl(db: LibSQLConnection, body: string): CurlTransportResponse =
-  var args = @[
-    "-sS",
-    "-X", "POST",
-    db.pipelineUrl,
-    "-H", "Content-Type: application/json",
-    "--data-binary", body,
-    "-w", "\n__NIMTRA_HTTP_CODE__=%{http_code}"
-  ]
-
-  if db.config.authToken.len > 0:
-    args.add("-H")
-    args.add("Authorization: Bearer " & db.config.authToken)
-
-  var process = startProcess(
-    command = "curl",
-    args = args,
-    options = {poUsePath, poStdErrToStdOut}
-  )
-  defer:
-    close(process)
-
-  let output = process.outputStream.readAll()
-  let exitCode = waitForExit(process)
-  if exitCode != 0:
-    raise newException(
-      LibSQLError,
-      "curl transport failed with exit code " & $exitCode & ": " & output.strip()
-    )
-
-  parseCurlTransportOutput(output)
-
 proc pipeline(db: LibSQLConnection, requests: seq[JsonNode]): Future[JsonNode] {.async.} =
   var body = %*{"requests": requests}
   if db.baton.isSome:
@@ -317,22 +256,14 @@ proc pipeline(db: LibSQLConnection, requests: seq[JsonNode]): Future[JsonNode] {
   while true:
     try:
       let requestBody = $body
-      var responseBody = ""
-      var code = 0
-
-      if db.config.preferCurlTransport:
-        let curlResp = pipelineViaCurl(db, requestBody)
-        code = curlResp.statusCode
-        responseBody = curlResp.body
-      else:
-        let response = await db.client.request(
-          db.pipelineUrl,
-          httpMethod = HttpPost,
-          headers = headers,
-          body = requestBody
-        )
-        responseBody = await response.body
-        code = int(response.code)
+      let response = await db.client.request(
+        db.pipelineUrl,
+        httpMethod = HttpPost,
+        headers = headers,
+        body = requestBody
+      )
+      let responseBody = await response.body
+      let code = int(response.code)
 
       if code >= 400:
         if isRetriableStatus(code) and attempt < db.config.maxRetries:
@@ -346,19 +277,6 @@ proc pipeline(db: LibSQLConnection, requests: seq[JsonNode]): Future[JsonNode] {
       result = parseAndStorePipelineState(responseBody)
       return
     except CatchableError as e:
-      if db.config.useCurlFallback and not db.config.preferCurlTransport:
-        try:
-          let curlResp = pipelineViaCurl(db, $body)
-          if curlResp.statusCode >= 400:
-            raise newException(
-              LibSQLError,
-              "libSQL HTTP error " & $curlResp.statusCode & " (curl fallback): " & curlResp.body
-            )
-          result = parseAndStorePipelineState(curlResp.body)
-          return
-        except CatchableError:
-          discard
-
       if (e of LibSQLError) or attempt >= db.config.maxRetries:
         raise
       inc attempt
@@ -375,8 +293,6 @@ proc openLibSQL*(
   maxRetries = 2,
   retryBackoffMs = 200,
   closeAfterExecute = true,
-  useCurlFallback = true,
-  preferCurlTransport = false,
   syncHook: SyncHook = nil,
   syncCloseHook: SyncCloseHook = nil
 ): Future[DbConnection] {.async.} =
@@ -393,8 +309,6 @@ proc openLibSQL*(
       maxRetries: max(0, maxRetries),
       retryBackoffMs: max(0, retryBackoffMs),
       closeAfterExecute: closeAfterExecute,
-      useCurlFallback: useCurlFallback,
-      preferCurlTransport: preferCurlTransport,
       syncHook: syncHook,
       syncCloseHook: syncCloseHook
     ),
@@ -547,9 +461,7 @@ proc openLibSQLEnv*(
   timeoutMs = 30_000,
   maxRetries = 2,
   retryBackoffMs = 200,
-  closeAfterExecute = true,
-  useCurlFallback = true,
-  preferCurlTransport = false
+  closeAfterExecute = true
 ): Future[DbConnection] {.async.} =
   var url = getEnv(urlEnv).strip()
   if url.len == 0 and urlEnv == "TURSO_DATABASE_URL":
@@ -574,9 +486,7 @@ proc openLibSQLEnv*(
     timeoutMs = timeoutMs,
     maxRetries = maxRetries,
     retryBackoffMs = retryBackoffMs,
-    closeAfterExecute = closeAfterExecute,
-    useCurlFallback = useCurlFallback,
-    preferCurlTransport = preferCurlTransport
+    closeAfterExecute = closeAfterExecute
   )
 
 proc withLibSQL*[T](
@@ -588,8 +498,6 @@ proc withLibSQL*[T](
   maxRetries = 2,
   retryBackoffMs = 200,
   closeAfterExecute = true,
-  useCurlFallback = true,
-  preferCurlTransport = false,
   body: proc(db: DbConnection): Future[T] {.closure.}
 ): Future[T] {.async.} =
   let db = await openLibSQL(
@@ -600,9 +508,7 @@ proc withLibSQL*[T](
     timeoutMs = timeoutMs,
     maxRetries = maxRetries,
     retryBackoffMs = retryBackoffMs,
-    closeAfterExecute = closeAfterExecute,
-    useCurlFallback = useCurlFallback,
-    preferCurlTransport = preferCurlTransport
+    closeAfterExecute = closeAfterExecute
   )
   try:
     return await body(db)
@@ -618,9 +524,7 @@ proc withLibSQLEnv*[T](
   timeoutMs = 30_000,
   maxRetries = 2,
   retryBackoffMs = 200,
-  closeAfterExecute = true,
-  useCurlFallback = true,
-  preferCurlTransport = false
+  closeAfterExecute = true
 ): Future[T] {.async.} =
   let db = await openLibSQLEnv(
     urlEnv = urlEnv,
@@ -630,9 +534,7 @@ proc withLibSQLEnv*[T](
     timeoutMs = timeoutMs,
     maxRetries = maxRetries,
     retryBackoffMs = retryBackoffMs,
-    closeAfterExecute = closeAfterExecute,
-    useCurlFallback = useCurlFallback,
-    preferCurlTransport = preferCurlTransport
+    closeAfterExecute = closeAfterExecute
   )
   try:
     return await body(db)

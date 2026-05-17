@@ -22,9 +22,7 @@ suite "connection helpers":
       authTokenEnv = "NIMTRA_TEST_TOKEN_ENV",
       syncUrlEnv = "NIMTRA_TEST_SYNC_ENV",
       maxRetries = 5,
-      retryBackoffMs = 123,
-      useCurlFallback = false,
-      preferCurlTransport = true
+      retryBackoffMs = 123
     )
 
     let conn = LibSQLConnection(db)
@@ -33,8 +31,6 @@ suite "connection helpers":
     check conn.config.syncUrl == "https://sync.example.com"
     check conn.config.maxRetries == 5
     check conn.config.retryBackoffMs == 123
-    check conn.config.useCurlFallback == false
-    check conn.config.preferCurlTransport
     waitFor db.close()
 
     delEnv("NIMTRA_TEST_URL_ENV")
@@ -44,12 +40,8 @@ suite "connection helpers":
   test "withLibSQL opens and closes around body":
     let value = waitFor withLibSQL(
       url = "https://example.com",
-      useCurlFallback = false,
-      preferCurlTransport = true,
       body = proc(db: DbConnection): Future[string] {.closure, async.} =
         let conn = LibSQLConnection(db)
-        check conn.config.useCurlFallback == false
-        check conn.config.preferCurlTransport
         return conn.config.url
     )
     check value == "https://example.com"

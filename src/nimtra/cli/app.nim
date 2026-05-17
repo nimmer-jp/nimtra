@@ -19,7 +19,6 @@ type
     migrationsTable: string
     url: string
     token: string
-    preferCurl: bool
     strict: bool
     version: Option[int64]
 
@@ -32,7 +31,6 @@ proc defaultConfig(): CliConfig =
     migrationsTable: DefaultMigrationsTable,
     url: "",
     token: "",
-    preferCurl: true,
     strict: false,
     version: none(int64)
   )
@@ -107,7 +105,6 @@ Options:
   --table, -t <name>       Migrations table (default: _nimtra_migrations)
   --url <libsql-url>       Override DB URL (otherwise env is used)
   --token <token>          Override auth token
-  --prefer-curl[=bool]     Use curl transport (default: true)
   --strict[=bool]          Strict verification mode (default: false)
   --version, -v <number>   Explicit migration version (for `new`)
 
@@ -135,11 +132,6 @@ proc parseMigrateArgs(args: seq[string]): tuple[subcommand: string, cfg: CliConf
     if arg.startsWith("--"):
       let (key, rawValue, hasEq) = splitLongOption(arg)
       case key
-      of "prefer-curl":
-        if hasEq:
-          result.cfg.preferCurl = parseBoolFlag(rawValue)
-        else:
-          result.cfg.preferCurl = true
       of "strict":
         if hasEq:
           result.cfg.strict = parseBoolFlag(rawValue)
@@ -217,8 +209,7 @@ proc openDb(cfg: CliConfig): Future[DbConnection] {.async.} =
     
     return await openLibSQL(
       url = url,
-      authToken = token,
-      preferCurlTransport = cfg.preferCurl
+      authToken = token
     )
 
 proc extractModelMeta(schemaFile: string): seq[ModelMeta] =

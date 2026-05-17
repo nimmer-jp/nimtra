@@ -25,7 +25,6 @@
 - `where(it.age >= 18)` のような compile-time 指向のクエリ記述
 - モデルからの schema SQL 生成と migration 実行
 - SQL ファイル管理にも対応した drizzle-like CLI
-- TLS が不安定な環境でも使いやすい `curl` フォールバック
 - ローカルレプリカ向けの native `libsql` sync hook
 
 ## Feature Snapshot
@@ -33,7 +32,7 @@
 | Layer | Highlights |
 | --- | --- |
 | Driver | `openLibSQL`, `openLibSQLEnv`, `execute`, `query`, `executeBatch`, `close` |
-| Connection helpers | `withLibSQL`, `withLibSQLEnv`, retry config, curl transport fallback |
+| Connection helpers | `withLibSQL`, `withLibSQLEnv`, retry config |
 | Query builder | `select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `where`, `orderBy`, `limit`, `offset`, `paginate`, `count`, `exists` |
 | CRUD | `insert`, `upsert`, `upsertReturningId`, `updateById`, `deleteById`, `findById`, `findAll`, `existsById` |
 | Mapper | `rowToModel`, `rowsToModels`, `allModels`, `firstModel`, `findByIdModel` |
@@ -201,7 +200,6 @@ nimtra migrate to 20260307121000
 | `--dir`, `-d` | Migration SQL directory. デフォルトは `db/migrations` |
 | `--table`, `-t` | Migration table 名. デフォルトは `_nimtra_migrations` |
 | `--url`, `--token` | 接続先を環境変数より優先して上書き |
-| `--prefer-curl` | `curl` transport を優先して使用 |
 | `--strict` | 厳密な verification を有効化 |
 | `--version`, `-v` | `migrate new` 作成時の version を明示 |
 
@@ -270,8 +268,6 @@ nimble test
 
 - `sync()` は `syncHook` を優先し、未指定なら `syncUrl`、さらに未指定なら軽量な `SELECT 1` checkpoint を実行します。
 - HTTP retry は transport error と `408` / `429` / `5xx` response に適用されます。
-- `useCurlFallback = true` は Nim 側 HTTP/TLS transport が失敗したときに `curl` を使って再試行します。
-- `preferCurlTransport = true` は全リクエストで `curl` transport を使います。
 - `openLibSQLEnv` は `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` を優先し、`TURSO_URL` / `TURSO_TOKEN` も fallback として受け付けます。
 - `autoRebuild = false` は安全寄りの差分適用に留め、`autoRebuild = true` は SQLite の table rebuild flow を生成します。
 - 適用済み migration には deterministic な `checksum` が保存され、`pendingMigrations` と `verifyMigrationHistory` で drift を検出できます。
