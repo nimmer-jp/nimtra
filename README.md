@@ -31,8 +31,8 @@
 
 | Layer | Highlights |
 | --- | --- |
-| Driver | `openLibSQL`, `openLibSQLEnv`, `execute`, `query`, `executeBatch`, `close` |
-| Connection helpers | `withLibSQL`, `withLibSQLEnv`, retry config |
+| Driver | HTTP: `openLibSQL`, `LibSQLAsyncPool`, `withLibSQLFromPool` / マルチスレッド同期: `openLibSQLSync`, `newLibSQLSyncPool`, … |
+| Connection helpers | `withLibSQL`, `withLibSQLEnv`, `withLibSQLSync`, `withLibSQLSyncEnv`, retry config |
 | Query builder | `select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `where`, `orderBy`, `limit`, `offset`, `paginate`, `count`, `exists` |
 | CRUD | `insert`, `upsert`, `upsertReturningId`, `updateById`, `deleteById`, `findById`, `findAll`, `existsById` |
 | Mapper | `rowToModel`, `rowsToModels`, `allModels`, `firstModel`, `findByIdModel` |
@@ -58,6 +58,35 @@ nimble install nimtra
 
 ### libSQL (Turso)
 
+`openLibSQL` が返す `LibSQLConnection` は **`AsyncHttpClient`** を共有し、**`asyncdispatch` の 1 本のイベントループ（1 dispatcher）上与えて順番に処理する設計前提**です。**単一ハンドルを全リクエストで共有すると、並行している `await` が互いをブロックするだけのことが多く、HTTP 側の並行度も上がりにくくなります。** ORM での既定の構成としては、`LibSQLAsyncPool` と `withLibSQLFromPool` で複数接続を先に張り、その中から自動で借用する運用が推奨です（処理はすべて同じイベントループ上だけが対象であり、複数 CPU への分散ではありません）。
+
+同じ **`LibSQLConnection` を複数 OS スレッドから同時に使わないでください**。複数ワーカーの OS スレッドで DB に触れたいときは、`HttpClient` ベースの **`openLibSQLSync`**（または **`openLibSQLSyncEnv`**）と **`newLibSQLSyncPool`** を検討します。そちらも **ひとつの接続を複数スレッドから同時に共有しないでください**。
+
+#### Async プール（ORM 推奨）
+
+```nim
+import std/asyncdispatch
+import nimtra
+
+proc handle(pool: LibSQLAsyncPool): Future[string] {.async.} =
+  await withLibSQLFromPool(pool, proc(db: DbConnection): Future[string] {.async.} =
+    discard await db.execute("SELECT 1")
+    return "ok"
+  )
+
+proc main() {.async.} =
+  let pool = await newLibSQLAsyncPoolEnv(size = 8)
+  discard await handle(pool)
+  await closeLibSQLAsyncPool(pool)
+
+waitFor main()
+```
+
+`borrowLibSQLAsync` / `releaseLibSQLAsync` で手動管理も可能です。この非同期プールは **`asyncdispatch` のシングルスレッド協調モデル専用**です（OS ロックを `await` 越えで掴む必要がないように実装してあります）。マルチスレッドサーバ本体からは **`newLibSQLSyncPool`** 側を使ってください。
+
+#### Async（単一接続）
+
+
 ```nim
 import nimtra
 
@@ -66,6 +95,41 @@ let db = await openLibSQL(url = "libsql://...", authToken = "...")
 
 # 環境変数 (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN) から接続
 let db = await openLibSQLEnv()
+```
+
+#### 同期 (`DbConnection` 互換、`waitFor` で利用)
+
+```nim
+import std/asyncdispatch
+import nimtra
+
+let dbSync = openLibSQLSync(url = "libsql://...", authToken = "...")
+
+discard waitFor dbSync.execute("SELECT 1")
+
+# 環境変数から開く
+let dbFromEnv = openLibSQLSyncEnv()
+
+discard waitFor dbSync.close()
+```
+
+#### 簡単な同期プール
+
+```nim
+import std/asyncdispatch
+import nimtra
+
+let pool = newLibSQLSyncPool(size = 4, url = "libsql://...", authToken = "...")
+
+proc run(pool: LibSQLSyncPool) =
+  let cx = borrowLibSQLSync(pool)
+  try:
+    discard waitFor cx.execute("SELECT 1")
+  finally:
+    releaseLibSQLSync(pool, cx)
+
+# シャットダウン: borrow されていない状態ですべて返却してから:
+closeLibSQLSyncPool(pool)
 ```
 
 ### PostgreSQL
@@ -268,6 +332,8 @@ nimble test
 
 - `sync()` は `syncHook` を優先し、未指定なら `syncUrl`、さらに未指定なら軽量な `SELECT 1` checkpoint を実行します。
 - HTTP retry は transport error と `408` / `429` / `5xx` response に適用されます。
+- **`LibSQLConnection` は `AsyncHttpClient` と `asyncdispatch` の 1 本のイベントループ専用**です。**非同期 libSQL での ORM は `LibSQLAsyncPool` + `withLibSQLFromPool` を検討**してください（ロックをイベントループ外で長時間ブロックしないプールです）。別 OS スレッドから並列に読み書きするときは **`openLibSQLSync` / `newLibSQLSyncPool`**（同期）を使い、接続オブジェクトはスレッド間で共有しないでください。
+- `LibSQLSyncConnection.sync()` は **`syncHook` / `syncCloseHook` を解釈しません**（`syncUrl` または `SELECT 1` のみ）。カスタム hook が必要なら async の `openLibSQL` を使います。
 - `openLibSQLEnv` は `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` を優先し、`TURSO_URL` / `TURSO_TOKEN` も fallback として受け付けます。
 - `autoRebuild = false` は安全寄りの差分適用に留め、`autoRebuild = true` は SQLite の table rebuild flow を生成します。
 - 適用済み migration には deterministic な `checksum` が保存され、`pendingMigrations` と `verifyMigrationHistory` で drift を検出できます。

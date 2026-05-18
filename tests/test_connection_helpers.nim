@@ -1,4 +1,4 @@
-import std/[asyncdispatch, os, unittest]
+import std/[asyncdispatch, os, strutils, unittest]
 
 import ../src/nimtra/driver/libsql_http
 import ../src/nimtra/driver/base
@@ -58,5 +58,112 @@ suite "connection helpers":
     check conn.config.authToken == "fallback-token"
     waitFor db.close()
 
-    delEnv("TURSO_URL")
-    delEnv("TURSO_TOKEN")
+  test "openLibSQLSyncEnv reads values":
+    putEnv("NIMTRA_TEST_SYNC_URL_ENV2", "https://example.com")
+    putEnv("NIMTRA_TEST_SYNC_TOKEN_ENV2", "token")
+    putEnv("NIMTRA_TEST_SYNC_SYNC_ENV2", "https://sync.example.com")
+
+    let db = openLibSQLSyncEnv(
+      urlEnv = "NIMTRA_TEST_SYNC_URL_ENV2",
+      authTokenEnv = "NIMTRA_TEST_SYNC_TOKEN_ENV2",
+      syncUrlEnv = "NIMTRA_TEST_SYNC_SYNC_ENV2",
+      maxRetries = 5,
+      retryBackoffMs = 123
+    )
+
+    check db.config.url == "https://example.com"
+    check db.config.authToken == "token"
+    check db.config.syncUrl == "https://sync.example.com"
+    check db.config.maxRetries == 5
+    check db.config.retryBackoffMs == 123
+    waitFor db.close()
+
+    delEnv("NIMTRA_TEST_SYNC_URL_ENV2")
+    delEnv("NIMTRA_TEST_SYNC_TOKEN_ENV2")
+    delEnv("NIMTRA_TEST_SYNC_SYNC_ENV2")
+
+  test "withLibSQLSync closes around body":
+    let value = withLibSQLSync(
+      url = "https://example.com",
+      body = proc(db: LibSQLSyncConnection): string {.closure.} =
+        db.config.url
+    )
+    check value == "https://example.com"
+
+  test "sync pool borrows round-trip then closes":
+    let pool = newLibSQLSyncPool(size = 1, url = "https://example.com")
+    let cx = borrowLibSQLSync(pool)
+    releaseLibSQLSync(pool, cx)
+    closeLibSQLSyncPool(pool)
+
+  test "sync pool rejects close while borrowed":
+    let pool = newLibSQLSyncPool(size = 1, url = "https://example.com")
+    discard borrowLibSQLSync(pool)
+    expect(LibSQLError):
+      closeLibSQLSyncPool(pool)
+
+  test "async pool lifecycle":
+    proc run(): Future[bool] {.async.} =
+      let pool = await newLibSQLAsyncPool(size = 2, url = "https://example.com")
+      if pool.borrowed != 0 or pool.capacity != 2:
+        return false
+      let c1 = await borrowLibSQLAsync(pool)
+      if pool.borrowed != 1:
+        return false
+      await releaseLibSQLAsync(pool, c1)
+      if pool.borrowed != 0:
+        return false
+      await closeLibSQLAsyncPool(pool)
+      result = true
+    check waitFor run()
+
+  test "async pool lends all slots":
+    proc run(): Future[bool] {.async.} =
+      let pool = await newLibSQLAsyncPool(2, url = "https://example.com")
+      let c1 = await borrowLibSQLAsync(pool)
+      let c2 = await borrowLibSQLAsync(pool)
+      if pool.borrowed != 2:
+        return false
+      await releaseLibSQLAsync(pool, c2)
+      if pool.borrowed != 1:
+        return false
+      await releaseLibSQLAsync(pool, c1)
+      await closeLibSQLAsyncPool(pool)
+      result = true
+    check waitFor run()
+
+  test "withLibSQLFromPool":
+    proc run(): Future[bool] {.async.} =
+      let pool = await newLibSQLAsyncPool(1, url = "https://example.com")
+      let pip = await withLibSQLFromPool(pool, proc(db: DbConnection): Future[string] {.async.} =
+        return LibSQLConnection(db).pipelineUrl
+      )
+      if not pip.endsWith("/v2/pipeline"):
+        return false
+      await closeLibSQLAsyncPool(pool)
+      result = true
+    check waitFor run()
+
+  test "async pool close rejects borrowed":
+    proc run(): Future[bool] {.async.} =
+      let pool = await newLibSQLAsyncPool(1, url = "https://example.com")
+      discard await borrowLibSQLAsync(pool)
+      var ok = false
+      try:
+        await closeLibSQLAsyncPool(pool)
+      except LibSQLError:
+        ok = true
+      result = ok
+    check waitFor run()
+
+  test "borrow from closed async pool fails":
+    proc run(): Future[bool] {.async.} =
+      let pool = await newLibSQLAsyncPool(1, url = "https://example.com")
+      await closeLibSQLAsyncPool(pool)
+      var ok = false
+      try:
+        discard await borrowLibSQLAsync(pool)
+      except LibSQLError:
+        ok = true
+      result = ok
+    check waitFor run()

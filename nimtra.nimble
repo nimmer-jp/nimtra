@@ -1,4 +1,4 @@
-version       = "0.2.0"
+version       = "0.2.1"
 author        = "nimtra contributors"
 description   = "Async-first ORM and libSQL client for Nim"
 license       = "MIT"
