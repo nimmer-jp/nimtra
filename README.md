@@ -31,11 +31,11 @@
 
 | Layer | Highlights |
 | --- | --- |
-| Driver | HTTP: `openLibSQL`, `LibSQLAsyncPool`, `withLibSQLFromPool` / マルチスレッド同期: `openLibSQLSync`, `newLibSQLSyncPool`, … |
-| Connection helpers | `withLibSQL`, `withLibSQLEnv`, `withLibSQLSync`, `withLibSQLSyncEnv`, retry config |
-| Query builder | `select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `where`, `orderBy`, `limit`, `offset`, `paginate`, `count`, `exists` |
+| Driver | HTTP: `openLibSQL`, `LibSQLAsyncPool`, `withLibSQLFromPool` / マルチスレッド同期: `openLibSQLSync`, `newLibSQLSyncPool`, `initLibSQLSyncThreadPool`, `withLibSQLSyncThread`, … |
+| Connection helpers | `withLibSQL`, `withLibSQLEnv`, `withLibSQLSync`, `withLibSQLSyncEnv`, `normalizeLibSqlUrl`, `validateLibSqlUrl`, retry config |
+| Query builder | `select`, `fromRaw`, `columnsRaw`, `join`, `leftJoin`, `groupBy`, `where`, `orderBy`, `limit`, `offset`, `paginate`, `count`, `exists`, `update().set().where().exec()` |
 | CRUD | `insert`, `upsert`, `upsertReturningId`, `updateById`, `deleteById`, `findById`, `findAll`, `existsById` |
-| Mapper | `rowToModel`, `rowsToModels`, `allModels`, `firstModel`, `findByIdModel` |
+| Mapper | `rowToModel`, `rowsToModels`, `allModels`, `allInto`, `queryInto`, `firstModel`, `findByIdModel` |
 | Schema | `modelMeta`, `createTableSql`, `createSchemaSql` |
 | Migration | `newMigration`, `migrationFromModel`, `migrate`, `migrateTo`, `pendingMigrations`, `verifyMigrationHistory` |
 | Schema diff | `tableSnapshot`, `planModelDiff`, `ensureModelSchemaDiff` |
@@ -60,7 +60,7 @@ nimble install nimtra
 
 `openLibSQL` が返す `LibSQLConnection` は **`AsyncHttpClient`** を共有し、**`asyncdispatch` の 1 本のイベントループ（1 dispatcher）上与えて順番に処理する設計前提**です。**単一ハンドルを全リクエストで共有すると、並行している `await` が互いをブロックするだけのことが多く、HTTP 側の並行度も上がりにくくなります。** ORM での既定の構成としては、`LibSQLAsyncPool` と `withLibSQLFromPool` で複数接続を先に張り、その中から自動で借用する運用が推奨です（処理はすべて同じイベントループ上だけが対象であり、複数 CPU への分散ではありません）。
 
-同じ **`LibSQLConnection` を複数 OS スレッドから同時に使わないでください**。複数ワーカーの OS スレッドで DB に触れたいときは、`HttpClient` ベースの **`openLibSQLSync`**（または **`openLibSQLSyncEnv`**）と **`newLibSQLSyncPool`** を検討します。そちらも **ひとつの接続を複数スレッドから同時に共有しないでください**。
+同じ **`LibSQLConnection` を複数 OS スレッドから同時に使わないでください**。Basolato + httpbeast のように **OS スレッドごとにリクエストを処理する**構成では、`openLibSQL`（async）ではなく **`initLibSQLSyncThreadPool` + `withLibSQLSyncThread`**（または `withLibSQLSyncThreadLocal`）を使ってください。各ワーカースレッドが専用の同期接続プールを持ち、`borrow` / `release` をスレッド内で完結できます。手動でプールを回す場合は **`openLibSQLSync`** / **`newLibSQLSyncPool`** でも構いませんが、接続オブジェクトは **スレッド間で共有しないでください**。
 
 #### Async プール（ORM 推奨）
 
@@ -82,7 +82,25 @@ proc main() {.async.} =
 waitFor main()
 ```
 
-`borrowLibSQLAsync` / `releaseLibSQLAsync` で手動管理も可能です。この非同期プールは **`asyncdispatch` のシングルスレッド協調モデル専用**です（OS ロックを `await` 越えで掴む必要がないように実装してあります）。マルチスレッドサーバ本体からは **`newLibSQLSyncPool`** 側を使ってください。
+`borrowLibSQLAsync` / `releaseLibSQLAsync` で手動管理も可能です。この非同期プールは **`asyncdispatch` のシングルスレッド協調モデル専用**です（OS ロックを `await` 越えで掴む必要がないように実装してあります）。マルチスレッドサーバ本体からは **`initLibSQLSyncThreadPool`** 側を使ってください。
+
+#### httpbeast / Basolato（スレッドローカル同期プール）
+
+```nim
+import std/asyncdispatch
+import nimtra
+
+proc main() =
+  initLibSQLSyncThreadPoolEnv(poolSize = 2)
+  # httpbeast ワーカー内:
+  waitFor withLibSQLSyncThread(proc(db: DbConnection): Future[void] {.async.} =
+    discard await db.execute("SELECT 1")
+  )
+
+main()
+```
+
+プロセス終了時は各ワーカースレッドで `closeLibSQLSyncThreadLocal()` を呼ぶと、そのスレッドのプールだけを閉じられます。
 
 #### Async（単一接続）
 
@@ -131,6 +149,8 @@ proc run(pool: LibSQLSyncPool) =
 # シャットダウン: borrow されていない状態ですべて返却してから:
 closeLibSQLSyncPool(pool)
 ```
+
+`TURSO_DATABASE_URL` は `normalizeLibSqlUrl` / `validateLibSqlUrl` で正規化・検証されます（`libsql://` の付与、scheme 重複、`libsql` ホスト誤設定など）。接続失敗時は `normalizeDbOpenError` により DNS / タイムアウト等が読みやすいメッセージに変換されます。
 
 ### PostgreSQL
 
@@ -192,6 +212,23 @@ proc main() {.async.} =
   await db.close()
 
 waitFor main()
+```
+
+部分更新と DTO マッピング:
+
+```nim
+discard await db
+  .update(FeatureRequest)
+  .set(status = "done")
+  .where(it.id == requestId)
+  .exec()
+
+let summaries = await db
+  .select(User)
+  .columnsRaw("users.id", "COUNT(documents.id) AS document_count")
+  .leftJoin("documents", "documents.user_id = users.id")
+  .groupBy("users.id")
+  .allInto(UserSummary)
 ```
 
 ## Migrations

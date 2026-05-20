@@ -1,6 +1,6 @@
 import std/[asyncdispatch, macros, options, sequtils, strutils]
 
-import ./[dialects, mapper, model, values]
+import ./[dialects, mapper, model, utils, values]
 import ./driver/base
 
 type
@@ -20,6 +20,7 @@ type
     rawSelectedColumns*: seq[string]
     joinClauses*: seq[string]
     whereClauses*: seq[string]
+    groupByClauses*: seq[string]
     params*: seq[SqlValue]
     orderByClauses*: seq[string]
     limitValue*: Option[int]
@@ -49,6 +50,7 @@ proc select* [T](
     rawSelectedColumns: @[],
     joinClauses: @[],
     whereClauses: @[],
+    groupByClauses: @[],
     params: @[],
     orderByClauses: @[],
     limitValue: none(int),
@@ -70,6 +72,7 @@ proc select* [T](
     rawSelectedColumns: @[],
     joinClauses: @[],
     whereClauses: @[],
+    groupByClauses: @[],
     params: @[],
     orderByClauses: @[],
     limitValue: none(int),
@@ -151,6 +154,21 @@ proc whereRaw* [T](query: Query[T], clause: string, args: openArray[SqlValue] = 
   result.whereClauses.add(clause)
   result.params.add(args)
 
+proc groupBy* [T](query: Query[T], columns: varargs[string]): Query[T] =
+  result = query
+  for col in columns:
+    let trimmed = col.strip()
+    if trimmed.len == 0:
+      raise newException(ValueError, "GROUP BY column cannot be empty")
+    result.groupByClauses.add(query.dialect.quoteIdent(trimmed))
+
+proc groupByRaw* [T](query: Query[T], clause: string): Query[T] =
+  let trimmed = clause.strip()
+  if trimmed.len == 0:
+    raise newException(ValueError, "GROUP BY clause cannot be empty")
+  result = query
+  result.groupByClauses.add(trimmed)
+
 proc orderBy* [T](query: Query[T], column: string, descending = false): Query[T] =
   result = query
   result.orderByClauses.add(
@@ -208,6 +226,9 @@ proc build* [T](query: Query[T]): SqlStatement =
 
   if query.whereClauses.len > 0:
     sql.add(" WHERE " & query.whereClauses.join(" AND "))
+
+  if query.groupByClauses.len > 0:
+    sql.add(" GROUP BY " & query.groupByClauses.join(", "))
 
   if query.orderByClauses.len > 0:
     sql.add(" ORDER BY " & query.orderByClauses.join(", "))
@@ -320,7 +341,8 @@ proc isModelField(node: NimNode): bool {.compileTime.} =
   unwrapModelField(node).isField
 
 proc escapeField(field: string): string {.compileTime.} =
-  "\"" & field.replace("\"", "\"\"") & "\""
+  let column = camelToSnake(field)
+  "\"" & column.replace("\"", "\"\"") & "\""
 
 proc mergePred(a, b: CompiledPredicate, joiner: string): CompiledPredicate {.compileTime.} =
   result.sql = "(" & a.sql & " " & joiner & " " & b.sql & ")"
@@ -478,12 +500,16 @@ proc compilePredicate(node: NimNode, fields: seq[string]): CompiledPredicate {.c
   else:
     error("Unsupported expression in where()", node)
 
-macro where*(query: typed, predicate: untyped): untyped =
-  let qType = query.getTypeInst
-  if qType.kind != nnkBracketExpr or qType.len < 2 or $qType[0] != "Query":
-    error("where() must be called on Query[T]", query)
+macro where*(target: typed, predicate: untyped): untyped =
+  let targetType = target.getTypeInst
+  if targetType.kind != nnkBracketExpr or targetType.len < 2:
+    error("where() must be called on Query[T] or UpdateBuilder[T]", target)
 
-  let modelType = qType[1]
+  let head = $targetType[0]
+  if head notin ["Query", "UpdateBuilder"]:
+    error("where() must be called on Query[T] or UpdateBuilder[T]", target)
+
+  let modelType = targetType[1]
   let fields = modelFieldNames(modelType)
   let compiled = compilePredicate(predicate, fields)
 
@@ -494,12 +520,20 @@ macro where*(query: typed, predicate: untyped): untyped =
 
   let argsNode = nnkPrefix.newTree(ident("@"), nnkBracket.newTree(argConversions))
 
-  result = quote do:
-    block:
-      var nextQuery = `query`
-      nextQuery.whereClauses.add(`sqlNode`)
-      nextQuery.params.add(`argsNode`)
-      nextQuery
+  if head == "Query":
+    result = quote do:
+      block:
+        var nextQuery = `target`
+        nextQuery.whereClauses.add(`sqlNode`)
+        nextQuery.params.add(`argsNode`)
+        nextQuery
+  else:
+    result = quote do:
+      block:
+        var nextBuilder = `target`
+        nextBuilder.whereClauses.add(`sqlNode`)
+        nextBuilder.params.add(`argsNode`)
+        nextBuilder
 
 proc all* [T](query: Query[T]): Future[seq[SqlRow]] {.async.} =
   if query.db.isNil:
@@ -514,6 +548,14 @@ proc allRows* [T](query: Query[T]): Future[seq[SqlRow]] {.async.} =
 proc allModels* [T](query: Query[T]): Future[seq[T]] {.async.} =
   let rows = await query.all()
   rowsToModels[T](rows)
+
+proc allInto* [T, R](query: Query[T], _: typedesc[R]): Future[seq[R]] {.async.} =
+  let rows = await query.all()
+  rowsToModels[R](rows)
+
+proc firstInto* [T, R](query: Query[T], _: typedesc[R]): Future[Option[R]] {.async.} =
+  let row = await query.first()
+  rowOptionToModel[R](row)
 
 proc first* [T](query: Query[T]): Future[Option[SqlRow]] {.async.} =
   let rows = await query.limit(1).all()
@@ -569,3 +611,85 @@ proc exists* [T](query: Query[T]): Future[bool] {.async.} =
   if not res.rows[0].hasKey("exists"):
     return false
   res.rows[0]["exists"].asBool()
+
+type
+  UpdateBuilder* [T] = object
+    db*: DbConnection
+    dialect*: Dialect
+    table*: string
+    setClauses*: seq[string]
+    whereClauses*: seq[string]
+    params*: seq[SqlValue]
+
+proc update* [T](
+  _: typedesc[T],
+  tableName = "",
+  dialect: Dialect = nil
+): UpdateBuilder[T] =
+  let resolvedTable = if tableName.len > 0: tableName else: defaultModelTable[T]()
+  UpdateBuilder[T](
+    db: nil,
+    dialect: if not dialect.isNil: dialect else: newSQLiteDialect(),
+    table: resolvedTable,
+    setClauses: @[],
+    whereClauses: @[],
+    params: @[]
+  )
+
+proc update* [T](
+  db: DbConnection,
+  modelType: typedesc[T],
+  tableName = ""
+): UpdateBuilder[T] =
+  if db.isNil:
+    raise newException(NimtraDbError, "Database handle is nil")
+  result = update(modelType, tableName, db.dialect)
+  result.db = db
+
+proc setField* [T](builder: UpdateBuilder[T], fieldName: string, value: auto): UpdateBuilder[T] =
+  result = builder
+  let column = sqlColumnName(fieldName)
+  result.setClauses.add(builder.dialect.quoteIdent(column) & " = ?")
+  result.params.add(toSqlValue(value))
+
+macro set*(builder: untyped, assignments: varargs[untyped]): untyped =
+  proc fieldAndValue(node: NimNode): (string, NimNode) =
+    case node.kind
+    of nnkExprColonExpr, nnkAsgn, nnkExprEqExpr:
+      let fieldName = extractFieldName(node[0])
+      if fieldName.len == 0:
+        error("set() could not resolve field name", node)
+      (fieldName, node[1])
+    of nnkInfix:
+      if node.len == 3 and $node[0] == "=":
+        let fieldName = extractFieldName(node[1])
+        if fieldName.len == 0:
+          error("set() could not resolve field name", node)
+        (fieldName, node[2])
+      else:
+        error("set() expects field = value pairs", node)
+    else:
+      error("set() expects field = value pairs: " & $node.kind, node)
+
+  result = builder
+  for assign in assignments:
+    let (fieldName, valueExpr) = fieldAndValue(assign)
+    result = quote do:
+      setField(`result`, `fieldName`, `valueExpr`)
+
+proc buildUpdate* [T](builder: UpdateBuilder[T]): SqlStatement =
+  if builder.setClauses.len == 0:
+    raise newException(ValueError, "UPDATE requires at least one SET column")
+  if builder.whereClauses.len == 0:
+    raise newException(ValueError, "UPDATE requires a WHERE clause (use where(it.id == ...))")
+  var sql = "UPDATE " & builder.dialect.quoteIdent(builder.table) &
+    " SET " & builder.setClauses.join(", ") &
+    " WHERE " & builder.whereClauses.join(" AND ")
+  sql = builder.dialect.applyPlaceholders(sql)
+  SqlStatement(sql: sql, params: builder.params)
+
+proc exec* [T](builder: UpdateBuilder[T]): Future[SqlResult] {.async.} =
+  if builder.db.isNil:
+    raise newException(NimtraDbError, "Database handle is nil")
+  let stmt = builder.buildUpdate()
+  await builder.db.execute(stmt)

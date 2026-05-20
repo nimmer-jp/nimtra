@@ -1,5 +1,8 @@
 import std/[options, strutils, tables]
 
+import std/asyncdispatch
+
+import ./driver/base
 import ./utils
 import ./values
 
@@ -59,3 +62,21 @@ proc rowOptionToModel*[T](row: Option[SqlRow]): Option[T] =
   if row.isNone:
     return none(T)
   some(rowToModel[T](row.get()))
+
+proc queryInto*[R](
+  db: DbConnection,
+  sql: string,
+  args: openArray[SqlValue] = []
+): Future[seq[R]] {.async.} =
+  let res = await db.query(sql, args)
+  rowsToModels[R](res.rows)
+
+proc queryFirstInto*[R](
+  db: DbConnection,
+  sql: string,
+  args: openArray[SqlValue] = []
+): Future[Option[R]] {.async.} =
+  let res = await db.query(sql, args)
+  if res.rows.len == 0:
+    return none(R)
+  some(rowToModel[R](res.rows[0]))

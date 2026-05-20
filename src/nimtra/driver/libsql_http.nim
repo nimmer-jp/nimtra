@@ -4,6 +4,15 @@ import std/[asyncdispatch, base64, deques, httpclient, json, locks, options, os,
 import ../[dialects, values]
 import ./base
 
+const
+  LibSqlUrlEmptyMsg* = "libSQL URL is empty"
+  LibSqlUrlDuplicateSchemeMsg* =
+    "libSQL URL has a duplicated scheme prefix (for example libsql://libsql://...)"
+  LibSqlUrlInvalidHostMsg* =
+    "libSQL URL host is 'libsql'. Set TURSO_DATABASE_URL to libsql://YOUR-DB.turso.io (not libsql://libsql/...)"
+  LibSqlUrlInvalidSchemeMsg* =
+    "libSQL URL must start with libsql://, https://, or http://"
+
 type
   LibSQLError* = object of NimtraDbError
 
@@ -38,32 +47,106 @@ type
 
   LibSQLSyncPool* = ref object
     lock: Lock
-    capacity: int
+    capacity*: int
     available: seq[LibSQLSyncConnection]
 
   LibSQLAsyncPool* = ref object
     ## Multiple libSQL AsyncHttp handles for overlapping ``await db.*`` workloads on **one**
     ## ``asyncdispatch`` loop. Do **not** call ``borrowLibSQLAsync`` / ``releaseLibSQLAsync``
-    ## from distinct OS threads; use ``newLibSQLSyncPool`` instead.
+    ## from distinct OS threads; use ``initLibSQLSyncThreadPool`` instead.
     capacity*: int
     borrowed*: int
     closed*: bool
     available: seq[LibSQLConnection]
     pendingWaiters: Deque[Future[LibSQLConnection]]
 
+  LibSQLSyncThreadConfig* = object
+    poolSize*: int
+    url*: string
+    authToken*: string
+    syncUrl*: string
+    syncPath*: string
+    timeoutMs*: int
+    maxRetries*: int
+    retryBackoffMs*: int
+    closeAfterExecute*: bool
 
+var
+  libSQLSyncThreadConfig*: LibSQLSyncThreadConfig
+  libSQLSyncThreadConfigReady* = false
+
+var tlsLibSQLSyncPool {.threadvar.}: LibSQLSyncPool
+
+proc normalizeLibSqlUrl*(raw: string): string =
+  ## Normalizes Turso/libSQL URLs for HTTP drivers.
+  ##
+  ## - Trims whitespace
+  ## - Adds ``libsql://`` when no scheme is present
+  ## - Detects duplicated scheme prefixes
+  var url = raw.strip()
+  if url.len == 0:
+    raise newException(ValueError, LibSqlUrlEmptyMsg)
+
+  let schemeCount = url.count("://")
+  if schemeCount > 1:
+    raise newException(LibSQLError, LibSqlUrlDuplicateSchemeMsg & ": " & url)
+  if schemeCount == 1 and url.startsWith("libsql://libsql://"):
+    raise newException(LibSQLError, LibSqlUrlDuplicateSchemeMsg & ": " & url)
+
+  if not (
+    url.startsWith("libsql://") or
+    url.startsWith("https://") or
+    url.startsWith("http://")
+  ):
+    url = "libsql://" & url
+
+  url
+
+proc validateLibSqlUrl*(url: string) =
+  ## Validates common Turso URL misconfigurations after normalization.
+  let normalized = normalizeLibSqlUrl(url)
+  var httpLike = normalized
+  if httpLike.startsWith("libsql://"):
+    httpLike = "https://" & httpLike[9 .. ^1]
+
+  if not (httpLike.startsWith("https://") or httpLike.startsWith("http://")):
+    raise newException(LibSQLError, LibSqlUrlInvalidSchemeMsg)
+
+  let parsed = parseUri(httpLike)
+  let host = parsed.hostname
+  if host.len > 0 and host.toLowerAscii() == "libsql":
+    raise newException(LibSQLError, LibSqlUrlInvalidHostMsg)
+
+proc normalizeDbOpenError*(msg: string): string =
+  ## Converts low-level transport errors into stable, operator-friendly messages.
+  let lower = msg.toLowerAscii()
+  if "no address associated with hostname" in lower or
+     "nodename nor servname provided" in lower or
+     "name or service not known" in lower or
+     "could not resolve host" in lower:
+    return "データベースのホスト名を解決できません。TURSO_DATABASE_URL のホスト名を確認してください。"
+  if "timed out" in lower or "timeout" in lower or "deadline exceeded" in lower:
+    return "データベースへの接続がタイムアウトしました。ネットワークと TURSO_DATABASE_URL を確認してください。"
+  if "connection refused" in lower:
+    return "データベースへの接続が拒否されました。URL とネットワーク設定を確認してください。"
+  if "certificate" in lower or "ssl" in lower or "tls" in lower:
+    return "データベースへの TLS 接続に失敗しました。URL と証明書設定を確認してください。"
+  msg
 
 proc makePipelineUrl(url: string): string =
-  var normalized = url.strip()
-  if normalized.startsWith("libsql://"):
-    normalized = "https://" & normalized[9 .. ^1]
-  elif not (normalized.startsWith("https://") or normalized.startsWith("http://")):
-    raise newException(LibSQLError, "libSQL URL must start with libsql://, https://, or http://")
+  let normalized = normalizeLibSqlUrl(url)
+  validateLibSqlUrl(normalized)
 
-  if normalized.endsWith("/"):
-    normalized = normalized[0 .. ^2]
+  var httpUrl = normalized
+  if httpUrl.startsWith("libsql://"):
+    httpUrl = "https://" & httpUrl[9 .. ^1]
+  elif not (httpUrl.startsWith("https://") or httpUrl.startsWith("http://")):
+    raise newException(LibSQLError, LibSqlUrlInvalidSchemeMsg)
 
-  normalized & "/v2/pipeline"
+  if httpUrl.endsWith("/"):
+    httpUrl = httpUrl[0 .. ^2]
+
+  httpUrl & "/v2/pipeline"
 
 proc bytesToString(data: seq[byte]): string =
   result = newString(data.len)
@@ -369,12 +452,14 @@ proc openLibSQL*(
   syncHook: SyncHook = nil,
   syncCloseHook: SyncCloseHook = nil
 ): Future[DbConnection] {.async.} =
+  let normalizedUrl = normalizeLibSqlUrl(url)
+  validateLibSqlUrl(normalizedUrl)
   var client = newAsyncHttpClient()
   client.timeout = timeoutMs
 
   result = LibSQLConnection(
     config: LibSQLConfig(
-      url: url,
+      url: normalizedUrl,
       authToken: authToken,
       syncUrl: syncUrl,
       syncPath: syncPath,
@@ -386,7 +471,7 @@ proc openLibSQL*(
       syncCloseHook: syncCloseHook
     ),
     client: client,
-    pipelineUrl: makePipelineUrl(url),
+    pipelineUrl: makePipelineUrl(normalizedUrl),
     baton: none(string),
     baseUrl: none(string),
     dialect: newSQLiteDialect()
@@ -644,27 +729,68 @@ proc openLibSQLSync*(
   retryBackoffMs = 200,
   closeAfterExecute = true
 ): LibSQLSyncConnection =
-  let syncClient = newHttpClient()
-  syncClient.timeout = timeoutMs
-  LibSQLSyncConnection(
-    config: LibSQLConfig(
-      url: url,
-      authToken: authToken,
-      syncUrl: syncUrl,
-      syncPath: syncPath,
-      timeoutMs: timeoutMs,
-      maxRetries: max(0, maxRetries),
-      retryBackoffMs: max(0, retryBackoffMs),
-      closeAfterExecute: closeAfterExecute,
-      syncHook: nil,
-      syncCloseHook: nil
-    ),
-    syncClient: syncClient,
-    pipelineUrl: makePipelineUrl(url),
-    baton: none(string),
-    baseUrl: none(string),
-    dialect: newSQLiteDialect()
-  )
+  try:
+    let normalizedUrl = normalizeLibSqlUrl(url)
+    validateLibSqlUrl(normalizedUrl)
+    let syncClient = newHttpClient()
+    syncClient.timeout = timeoutMs
+    LibSQLSyncConnection(
+      config: LibSQLConfig(
+        url: normalizedUrl,
+        authToken: authToken,
+        syncUrl: syncUrl,
+        syncPath: syncPath,
+        timeoutMs: timeoutMs,
+        maxRetries: max(0, maxRetries),
+        retryBackoffMs: max(0, retryBackoffMs),
+        closeAfterExecute: closeAfterExecute,
+        syncHook: nil,
+        syncCloseHook: nil
+      ),
+      syncClient: syncClient,
+      pipelineUrl: makePipelineUrl(normalizedUrl),
+      baton: none(string),
+      baseUrl: none(string),
+      dialect: newSQLiteDialect()
+    )
+  except LibSQLError as e:
+    raise e
+  except CatchableError as e:
+    raise newException(LibSQLError, normalizeDbOpenError(e.msg))
+
+proc openLibSQLSyncWithRetry*(
+  url: string,
+  authToken = "",
+  syncUrl = "",
+  syncPath = "/v1/sync",
+  timeoutMs = 30_000,
+  maxRetries = 2,
+  retryBackoffMs = 200,
+  closeAfterExecute = true
+): LibSQLSyncConnection =
+  var attempt = 0
+  var lastError = ""
+  while attempt <= max(0, maxRetries):
+    try:
+      return openLibSQLSync(
+        url = url,
+        authToken = authToken,
+        syncUrl = syncUrl,
+        syncPath = syncPath,
+        timeoutMs = timeoutMs,
+        maxRetries = maxRetries,
+        retryBackoffMs = retryBackoffMs,
+        closeAfterExecute = closeAfterExecute
+      )
+    except CatchableError as e:
+      lastError = normalizeDbOpenError(e.msg)
+      if attempt >= max(0, maxRetries):
+        raise newException(LibSQLError, lastError)
+      inc attempt
+      let delay = max(0, retryBackoffMs) * attempt
+      if delay > 0:
+        sleep(delay)
+  raise newException(LibSQLError, lastError)
 
 proc openLibSQLSyncEnv*(
   urlEnv = "TURSO_DATABASE_URL",
@@ -691,7 +817,7 @@ proc openLibSQLSyncEnv*(
     authToken = getEnv("TURSO_TOKEN")
   let syncUrl = getEnv(syncUrlEnv)
 
-  openLibSQLSync(
+  openLibSQLSyncWithRetry(
     url = url,
     authToken = authToken,
     syncUrl = syncUrl,
@@ -720,7 +846,7 @@ proc newLibSQLSyncPool*(
   result.capacity = size
   result.available = newSeqOfCap[LibSQLSyncConnection](size)
   for _ in 0 ..< size:
-    result.available.add(openLibSQLSync(
+    result.available.add(openLibSQLSyncWithRetry(
       url = url,
       authToken = authToken,
       syncUrl = syncUrl,
@@ -758,6 +884,124 @@ proc closeLibSQLSyncPool*(pool: LibSQLSyncPool) =
   finally:
     release(pool.lock)
   deinitLock(pool.lock)
+
+proc initLibSQLSyncThreadPool*(
+  poolSize: int,
+  url: string,
+  authToken = "",
+  syncUrl = "",
+  syncPath = "/v1/sync",
+  timeoutMs = 30_000,
+  maxRetries = 2,
+  retryBackoffMs = 200,
+  closeAfterExecute = true
+) =
+  ## Registers configuration for per-OS-thread sync pools.
+  ##
+  ## Call once at process startup (for example before httpbeast workers start).
+  ## Each worker thread lazily creates its own ``LibSQLSyncPool`` on first use via
+  ## ``threadLocalLibSQLSyncPool`` / ``withLibSQLSyncThread``.
+  ##
+  ## Do **not** share a single ``LibSQLSyncConnection`` across OS threads.
+  ## Basolato + httpbeast: prefer this over ``openLibSQL`` (async) on worker threads.
+  if poolSize <= 0:
+    raise newException(ValueError, "LibSQL sync thread pool size must be positive")
+  libSQLSyncThreadConfig = LibSQLSyncThreadConfig(
+    poolSize: poolSize,
+    url: url,
+    authToken: authToken,
+    syncUrl: syncUrl,
+    syncPath: syncPath,
+    timeoutMs: timeoutMs,
+    maxRetries: maxRetries,
+    retryBackoffMs: retryBackoffMs,
+    closeAfterExecute: closeAfterExecute
+  )
+  libSQLSyncThreadConfigReady = true
+
+proc initLibSQLSyncThreadPoolEnv*(
+  poolSize: int,
+  urlEnv = "TURSO_DATABASE_URL",
+  authTokenEnv = "TURSO_AUTH_TOKEN",
+  syncUrlEnv = "TURSO_SYNC_URL",
+  syncPath = "/v1/sync",
+  timeoutMs = 30_000,
+  maxRetries = 2,
+  retryBackoffMs = 200,
+  closeAfterExecute = true
+) =
+  var url = getEnv(urlEnv).strip()
+  if url.len == 0 and urlEnv == "TURSO_DATABASE_URL":
+    url = getEnv("TURSO_URL").strip()
+  if url.len == 0:
+    raise newException(
+      ValueError,
+      "Environment variable not set: " & urlEnv & " (or TURSO_URL)"
+    )
+
+  var authToken = getEnv(authTokenEnv)
+  if authToken.len == 0 and authTokenEnv == "TURSO_AUTH_TOKEN":
+    authToken = getEnv("TURSO_TOKEN")
+  let syncUrl = getEnv(syncUrlEnv)
+
+  initLibSQLSyncThreadPool(
+    poolSize = poolSize,
+    url = url,
+    authToken = authToken,
+    syncUrl = syncUrl,
+    syncPath = syncPath,
+    timeoutMs = timeoutMs,
+    maxRetries = maxRetries,
+    retryBackoffMs = retryBackoffMs,
+    closeAfterExecute = closeAfterExecute
+  )
+
+proc threadLocalLibSQLSyncPool*(): LibSQLSyncPool =
+  if not libSQLSyncThreadConfigReady:
+    raise newException(
+      LibSQLError,
+      "initLibSQLSyncThreadPool() must be called before threadLocalLibSQLSyncPool()"
+    )
+  if tlsLibSQLSyncPool.isNil:
+    let cfg = libSQLSyncThreadConfig
+    tlsLibSQLSyncPool = newLibSQLSyncPool(
+      size = cfg.poolSize,
+      url = cfg.url,
+      authToken = cfg.authToken,
+      syncUrl = cfg.syncUrl,
+      syncPath = cfg.syncPath,
+      timeoutMs = cfg.timeoutMs,
+      maxRetries = cfg.maxRetries,
+      retryBackoffMs = cfg.retryBackoffMs,
+      closeAfterExecute = cfg.closeAfterExecute
+    )
+  tlsLibSQLSyncPool
+
+proc withLibSQLSyncThread*[T](
+  body: proc(db: DbConnection): Future[T] {.closure.}
+): Future[T] {.async.} =
+  let pool = threadLocalLibSQLSyncPool()
+  let cx = borrowLibSQLSync(pool)
+  try:
+    return await body(cx)
+  finally:
+    releaseLibSQLSync(pool, cx)
+
+proc withLibSQLSyncThreadLocal*[T](
+  body: proc(db: LibSQLSyncConnection): T {.closure.}
+): T =
+  let pool = threadLocalLibSQLSyncPool()
+  let cx = borrowLibSQLSync(pool)
+  try:
+    return body(cx)
+  finally:
+    releaseLibSQLSync(pool, cx)
+
+proc closeLibSQLSyncThreadLocal*() =
+  ## Closes the sync pool for the **current** OS thread only.
+  if not tlsLibSQLSyncPool.isNil:
+    closeLibSQLSyncPool(tlsLibSQLSyncPool)
+    tlsLibSQLSyncPool = nil
 
 proc newLibSQLAsyncPool*(
   size: int,

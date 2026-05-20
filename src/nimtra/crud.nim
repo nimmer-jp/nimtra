@@ -1,6 +1,6 @@
 import std/[asyncdispatch, options, sequtils, strutils]
 
-import ./[mapper, model, values]
+import ./[mapper, model, utils, values]
 import ./driver/base
 
 proc defaultCrudTable[T](): string =
@@ -35,7 +35,7 @@ proc collectInsertData[T](entity: T, idField: string): tuple[cols: seq[string], 
         if fieldName == idField and fieldValue == 0:
           includeField = false
       if includeField:
-        result.cols.add(fieldName)
+        result.cols.add(sqlColumnName(fieldName))
         result.params.add(toSqlValue(fieldValue))
   else:
     for fieldName, fieldValue in fieldPairs(entity):
@@ -44,7 +44,7 @@ proc collectInsertData[T](entity: T, idField: string): tuple[cols: seq[string], 
         if fieldName == idField and fieldValue == 0:
           includeField = false
       if includeField:
-        result.cols.add(fieldName)
+        result.cols.add(sqlColumnName(fieldName))
         result.params.add(toSqlValue(fieldValue))
 
 proc insert* [T](
@@ -267,7 +267,7 @@ proc updateById* [T](
       hasId = true
       continue
 
-    setClauses.add(db.dialect.quoteIdent(fieldName) & " = ?")
+    setClauses.add(db.dialect.quoteIdent(sqlColumnName(fieldName)) & " = ?")
     params.add(toSqlValue(fieldValue))
 
   if not hasId:
@@ -280,7 +280,7 @@ proc updateById* [T](
 
   let sql = "UPDATE " & db.dialect.quoteIdent(targetTable) &
     " SET " & setClauses.join(", ") &
-    " WHERE " & db.dialect.quoteIdent(idField) & " = ?"
+    " WHERE " & db.dialect.quoteIdent(sqlColumnName(idField)) & " = ?"
 
   await db.execute(sql, params)
 

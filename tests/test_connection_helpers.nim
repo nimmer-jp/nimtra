@@ -102,6 +102,15 @@ suite "connection helpers":
     expect(LibSQLError):
       closeLibSQLSyncPool(pool)
 
+  test "thread-local sync pool config":
+    initLibSQLSyncThreadPool(poolSize = 1, url = "https://example.com")
+    let pool = threadLocalLibSQLSyncPool()
+    check pool.capacity == 1
+    let cx = borrowLibSQLSync(pool)
+    releaseLibSQLSync(pool, cx)
+    closeLibSQLSyncThreadLocal()
+    libSQLSyncThreadConfigReady = false
+
   test "async pool lifecycle":
     proc run(): Future[bool] {.async.} =
       let pool = await newLibSQLAsyncPool(size = 2, url = "https://example.com")

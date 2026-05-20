@@ -53,6 +53,17 @@ suite "public api":
         discard await db.upsert(user, "id")
     )
 
+  test "partial update api compiles":
+    var db: LibSQLConnection
+    check compiles(
+      proc (db: LibSQLConnection) {.async.} =
+        discard await db
+          .update(User)
+          .set(status = "archived")
+          .where(it.id == 1)
+          .exec()
+    )
+
   test "join api compiles":
     let stmt = select(User)
       .columnsRaw("\"users\".\"id\"", "\"profiles\".\"bio\"")
