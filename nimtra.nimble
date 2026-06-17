@@ -1,4 +1,4 @@
-version       = "0.2.2"
+version       = "0.2.3"
 author        = "nimtra contributors"
 description   = "Async-first ORM and libSQL client for Nim"
 license       = "MIT"
@@ -11,4 +11,4 @@ requires "nim >= 2.0.0"
 requires "db_connector"
 
 task test, "Run the package test suite":
-  exec "for t in tests/test_*.nim; do nim c -r --hints:off --nimcache:.nimcache-tests --path:src \"$t\" || exit 1; done"
+  exec "for t in tests/test_*.nim tests/import_*.nim; do nim c -r --hints:off --nimcache:.nimcache-tests --path:src \"$t\" || exit 1; done"

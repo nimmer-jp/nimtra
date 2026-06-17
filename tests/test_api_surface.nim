@@ -1,6 +1,7 @@
 import std/[asyncdispatch, unittest]
 
 import ../src/nimtra
+import ../src/nimtra/driver/libsql_http
 
 type
   User = ref object

@@ -1,0 +1,3 @@
+import nimtra
+
+echo "ok"
